@@ -48,9 +48,12 @@
 
 ## Phase 7 — Production deployment
 
-- [ ] Signed MSI/PKG/DMG
-- [ ] VPS HTTPS / Let's Encrypt
-- [ ] Production secrets + backups
+- [x] VPS port map 4000/4001 + host Postgres + Caddy snippet
+- [x] PM2 deploy scripts (`infrastructure/deploy/`)
+- [x] GitHub Actions Deploy VPS + Release agent (macOS/Windows)
+- [ ] One-time root bootstrap on VPS (Postgres role + Caddy + DNS)
+- [ ] Signed MSI/PKG/DMG (Apple/Authenticode)
+- [ ] Automated Postgres backups
 
 ### Operator verification
 

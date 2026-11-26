@@ -1,0 +1,35 @@
+# Production-oriented port map (4000+). Use with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# On the current VPS prefer PM2 (see docs/DEPLOYMENT.md) — deploy has no Docker access.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:4003:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:4002:6379"
+
+  minio:
+    ports:
+      - "127.0.0.1:4004:9000"
+      - "127.0.0.1:4005:9001"
+
+  api:
+    ports:
+      - "127.0.0.1:4000:8000"
+
+  dashboard:
+    ports:
+      - "127.0.0.1:4001:3000"
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://cu.jobapplicationtracking.tech/api/v1}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://cu.jobapplicationtracking.tech/api/v1}
+
+  nginx:
+    ports:
+      - "127.0.0.1:4006:80"

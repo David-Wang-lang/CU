@@ -1,0 +1,126 @@
+name: Release agent (macOS + Windows)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-daemon:
+    name: Daemon (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: cu-agent-daemon-windows-x64.exe
+            bin: cu-agent-daemon.exe
+          - name: macos-intel
+            os: macos-13
+            target: x86_64-apple-darwin
+            artifact: cu-agent-daemon-macos-x64
+            bin: cu-agent-daemon
+          - name: macos-arm
+            os: macos-14
+            target: aarch64-apple-darwin
+            artifact: cu-agent-daemon-macos-arm64
+            bin: cu-agent-daemon
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build daemon (release)
+        working-directory: apps/agent
+        run: cargo build -p cu-agent-daemon --release --target ${{ matrix.target }}
+      - name: Stage artifact
+        shell: bash
+        run: |
+          SRC="apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          mkdir -p dist
+          cp "$SRC" "dist/${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-${{ matrix.name }}
+          path: dist/${{ matrix.artifact }}
+
+  build-setup:
+    name: Setup app (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-arm
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: macos-intel
+            os: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+      - name: Install Linux WebKit deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Build Tauri setup (unsigned)
+        working-directory: apps/agent
+        env:
+          TAURI_BUNDLE_ACTIVE: "true"
+        run: pnpm tauri build --target ${{ matrix.target }}
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-${{ matrix.name }}
+          path: |
+            apps/agent/src-tauri/target/${{ matrix.target }}/release/bundle
+            apps/agent/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: warn
+
+  release:
+    name: GitHub Release
+    needs: [build-daemon, build-setup]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Pack
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name 'cu-agent-daemon*' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.app.tar.gz' \) -exec cp {} release/ \;
+          ls -laR artifacts release || true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,51 +1,94 @@
 # Deployment
 
-## Target (initial VPS)
+## This VPS (current)
 
-- Ubuntu 24.04 LTS
-- 4 vCPU / 8 GB RAM / 200 GB SSD
-- Docker + Docker Compose
-- HTTPS domain (Let's Encrypt) — Phase 7
+Host: `179.197.86.236` (`srv2105818`)
 
-## Services
+| Already in use | Service |
+|----------------|---------|
+| 22 | SSH |
+| 80 / 443 | Caddy |
+| 5432 (localhost) | PostgreSQL 18 |
+| 8000 / 3100 (localhost) | BidBot (PM2) |
+| 3210 | Upwork bot |
+| 8443 / 8787 | tg-job-bot |
 
-Defined in root `docker-compose.yml`:
+**CU ports (free):**
 
-| Service | Role |
-|---------|------|
-| nginx | Reverse proxy (port 8080 in Phase 1 stub) |
-| api | FastAPI + Alembic entrypoint |
-| dashboard | Next.js standalone |
-| postgres | Metadata |
-| redis | Celery broker/backend |
-| celery-worker | Background jobs |
-| celery-beat | Scheduler (retention in Phase 5) |
-| minio | S3-compatible object storage |
-| minio-init | Creates private bucket |
+| Port | Service |
+|------|---------|
+| **4000** | CU API (`127.0.0.1`) |
+| **4001** | CU Dashboard (`127.0.0.1`) |
 
-Volumes `postgres_data`, `redis_data`, and `minio_data` are persistent.
+Public HTTPS via Caddy host `cu.jobapplicationtracking.tech` → 4000/4001.
 
-## Deploy steps (Phase 1 outline)
+Deploy user: `deploy` (PM2, no Docker socket, no passwordless sudo).  
+App root: `~/cu` (`/home/deploy/cu`).
 
-1. Clone repo on the VPS.
-2. Copy `.env.example` → `.env` and set strong secrets.
-3. `docker compose up -d --build`
-4. Verify `GET /api/v1/health` through Nginx.
-5. Configure TLS and domain (Phase 7).
-6. Schedule backups for Postgres and MinIO volumes.
-
-## Local full stack
+## One-time bootstrap (needs root/sudo)
 
 ```bash
-cp .env.example .env
-./scripts/dev-up.sh
+# On the VPS as someone with sudo:
+sudo CU_DOMAIN=cu.jobapplicationtracking.tech \
+  bash /home/deploy/cu/repo/infrastructure/deploy/bootstrap-root.sh
 ```
 
-Stop with `./scripts/dev-down.sh` (volumes preserved).
+Creates Postgres role/DB `cu`, writes `~/cu/shared/.env`, appends Caddy site, reloads Caddy.
+
+Point DNS: `cu.jobapplicationtracking.tech` → `179.197.86.236`.
+
+## Deploy (as `deploy`)
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+export CU_APP_ROOT="$HOME/cu"
+# after repo is at ~/cu/repo
+bash ~/cu/repo/infrastructure/deploy/deploy.sh
+pm2 status
+curl -s http://127.0.0.1:4000/api/v1/health
+```
+
+## GitHub Actions CI/CD
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `CI` | PR / push | API tests, dashboard build, agent checks |
+| `Deploy VPS` | push `main` / manual | rsync → build → PM2 reload |
+| `Release agent` | tag `v*` / manual | Windows + macOS daemon + Tauri setup artifacts |
+
+### Required GitHub secrets
+
+| Secret | Example |
+|--------|---------|
+| `VPS_HOST` | `179.197.86.236` |
+| `VPS_USER` | `deploy` |
+| `VPS_SSH_KEY` | private key contents for `~/.ssh/bidbot_vps` |
+
+## Agent packages (macOS / Windows)
+
+```bash
+# Local
+cd apps/agent
+cargo build -p cu-agent-daemon --release
+pnpm tauri build   # Setup wizard (MSI / DMG)
+```
+
+Or run workflow **Release agent** and download artifacts / GitHub Release assets.
+
+Unsigned builds are fine for internal IT; production signing (Apple Developer / Authenticode) is a follow-up.
+
+## Compose (optional)
+
+If the deploy user later gets Docker access:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Maps API/dashboard to host **4000/4001** and keeps Postgres/Redis/MinIO on 4002–4005.
 
 ## Production notes
 
-- Bind API to `0.0.0.0:$PORT` inside containers (Compose uses 8000).
-- Filesystem is ephemeral outside named volumes — never store screenshots only on container FS.
-- Size storage from measured retention (default 15 days) and device count.
-- Healthchecks and `restart: unless-stopped` are configured for core services.
+- Bind API to `127.0.0.1:4000`; expose only through Caddy.
+- Screenshots live under `~/cu/shared/data/screenshots` (persistent across releases).
+- Do not conflict with BidBot ports 8000/3100 or host Postgres 5432.

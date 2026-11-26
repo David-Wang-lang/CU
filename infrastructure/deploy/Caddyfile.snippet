@@ -1,0 +1,21 @@
+# Append to /etc/caddy/Caddyfile (requires root). DNS A record → VPS IP.
+# Default host: cu.jobapplicationtracking.tech
+
+cu.jobapplicationtracking.tech {
+    encode gzip
+    request_body {
+        max_size 64MB
+    }
+    handle /api/* {
+        reverse_proxy 127.0.0.1:4000
+    }
+    handle /docs* {
+        reverse_proxy 127.0.0.1:4000
+    }
+    handle /openapi.json {
+        reverse_proxy 127.0.0.1:4000
+    }
+    handle {
+        reverse_proxy 127.0.0.1:4001
+    }
+}

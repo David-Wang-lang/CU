@@ -1,0 +1,57 @@
+name: Deploy VPS
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          test -n "$SSH_KEY" || (echo "Missing secret VPS_SSH_KEY" && exit 1)
+          test -n "$VPS_HOST" || (echo "Missing secret VPS_HOST" && exit 1)
+          test -n "$VPS_USER" || (echo "Missing secret VPS_USER" && exit 1)
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Rsync release source
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/vps_key -o IdentitiesOnly=yes" \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude '.next' \
+            --exclude 'apps/api/.venv' \
+            --exclude 'apps/api/data' \
+            --exclude 'apps/agent/target' \
+            --exclude '.dev-logs' \
+            --exclude '.dev-pids' \
+            ./ "${VPS_USER}@${VPS_HOST}:~/cu/repo/"
+
+      - name: Remote build + PM2 reload
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/vps_key -o IdentitiesOnly=yes "${VPS_USER}@${VPS_HOST}" \
+            'export PATH="$HOME/.local/bin:$PATH"; export CU_APP_ROOT="$HOME/cu"; bash ~/cu/repo/infrastructure/deploy/deploy.sh'
