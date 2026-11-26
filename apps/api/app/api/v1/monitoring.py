@@ -1,10 +1,12 @@
 import asyncio
 import base64
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -169,6 +171,83 @@ async def upload_screenshot(
         captured_at=captured,
         is_mock=is_mock,
     )
+
+
+class BatchItem(BaseModel):
+    file: str
+    captured_at: str | None = None
+    is_mock: bool = False
+    mouse_x: float | None = None
+    mouse_y: float | None = None
+    mouse_buttons: int | None = None
+    mouse_action: str | None = None
+
+
+class BatchUploadResponse(BaseModel):
+    accepted: int
+    accepted_files: list[str]
+
+
+@router.post("/screenshots/batch", response_model=BatchUploadResponse)
+async def upload_screenshot_batch(
+    manifest: str = Form(...),
+    files: list[UploadFile] = File(...),
+    device_ctx: DeviceContext = Depends(get_current_device),
+    db: AsyncSession = Depends(get_db),
+) -> BatchUploadResponse:
+    device = device_ctx.device
+    if device.monitoring_authorization != "authorized":
+        raise HTTPException(status_code=403, detail="Monitoring not authorized")
+    try:
+        items = [BatchItem.model_validate(item) for item in json.loads(manifest)]
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid manifest: {exc}") from exc
+    by_name = {}
+    for upload in files:
+        data = await upload.read()
+        by_name[upload.filename or ""] = (data, upload.content_type or "image/jpeg")
+    retention_days = await get_retention_days(db, device.organization_id)
+    accepted_files: list[str] = []
+    for item in items:
+        found = by_name.get(item.file)
+        if found is None:
+            continue
+        data, content_type = found
+        captured = (
+            datetime.fromisoformat(item.captured_at)
+            if item.captured_at
+            else datetime.now(UTC)
+        )
+        record_id = uuid4()
+        object_key, size = save_screenshot_bytes(
+            organization_id=device.organization_id,
+            device_id=device.id,
+            record_id=record_id,
+            data=data,
+            content_type=content_type,
+        )
+        action = (item.mouse_action or None) and item.mouse_action[:32]
+        db.add(
+            ScreenshotRecord(
+                id=record_id,
+                organization_id=device.organization_id,
+                device_id=device.id,
+                captured_at=captured,
+                monitor_index=0,
+                object_key=object_key,
+                content_type=content_type,
+                byte_size=size,
+                is_mock=item.is_mock,
+                mouse_x=item.mouse_x,
+                mouse_y=item.mouse_y,
+                mouse_buttons=item.mouse_buttons,
+                mouse_action=action,
+                expires_at=captured + timedelta(days=retention_days),
+            )
+        )
+        accepted_files.append(item.file)
+    await db.commit()
+    return BatchUploadResponse(accepted=len(accepted_files), accepted_files=accepted_files)
 
 
 @router.get("/screenshots", response_model=list[ScreenshotOut])

@@ -8,6 +8,7 @@ pub mod api;
 pub mod autostart;
 pub mod config;
 pub mod mock;
+pub mod spool;
 
 pub use autostart::uninstall_daemon_autostart;
 pub use config::{

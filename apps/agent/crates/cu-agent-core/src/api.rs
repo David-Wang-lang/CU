@@ -152,6 +152,134 @@ pub fn upload_screenshot(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct BatchItem<'a> {
+    file: String,
+    captured_at: &'a str,
+    is_mock: bool,
+    mouse_x: Option<f64>,
+    mouse_y: Option<f64>,
+    mouse_buttons: Option<u8>,
+    mouse_action: Option<&'a str>,
+}
+
+pub struct BatchFrame {
+    pub file_name: String,
+    pub jpeg: Vec<u8>,
+    pub captured_at: String,
+    pub is_mock: bool,
+    pub mouse_x: Option<f64>,
+    pub mouse_y: Option<f64>,
+    pub mouse_buttons: Option<u8>,
+    pub mouse_action: Option<String>,
+}
+
+/// Upload up to one minute of frames in a single request.
+/// Returns the file names the server stored. A 404 falls back to one-by-one upload.
+pub fn upload_screenshot_batch(
+    config: &AgentConfig,
+    frames: &[BatchFrame],
+) -> Result<Vec<String>, CoreError> {
+    if frames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (client_id, secret) = creds(config)?;
+    let items: Vec<BatchItem> = frames
+        .iter()
+        .map(|frame| BatchItem {
+            file: frame.file_name.clone(),
+            captured_at: &frame.captured_at,
+            is_mock: frame.is_mock,
+            mouse_x: frame.mouse_x,
+            mouse_y: frame.mouse_y,
+            mouse_buttons: frame.mouse_buttons,
+            mouse_action: frame.mouse_action.as_deref(),
+        })
+        .collect();
+    let manifest = serde_json::to_string(&items)?;
+    let mut form = multipart::Form::new().text("manifest", manifest);
+    for frame in frames {
+        let part = multipart::Part::bytes(frame.jpeg.clone())
+            .file_name(frame.file_name.clone())
+            .mime_str("image/jpeg")
+            .map_err(|e| CoreError::Config(e.to_string()))?;
+        form = form.part("files", part);
+    }
+    let url = format!(
+        "{}/screenshots/batch",
+        config.api_base_url.trim_end_matches('/')
+    );
+    let res = batch_client()?
+        .post(&url)
+        .basic_auth(client_id, Some(secret))
+        .multipart(form)
+        .send()
+        .map_err(|e| CoreError::Config(format!("batch upload failed: {e}")))?;
+    if res.status() == StatusCode::NOT_FOUND {
+        let mut accepted = Vec::new();
+        for frame in frames {
+            upload_jpeg(config, frame)?;
+            accepted.push(frame.file_name.clone());
+        }
+        return Ok(accepted);
+    }
+    if !res.status().is_success() {
+        let text = res.text().unwrap_or_default();
+        return Err(CoreError::Config(format!("batch upload rejected: {text}")));
+    }
+    let body: BatchAccepted = res
+        .json()
+        .map_err(|e| CoreError::Config(format!("batch upload parse failed: {e}")))?;
+    Ok(body.accepted_files)
+}
+
+fn upload_jpeg(config: &AgentConfig, frame: &BatchFrame) -> Result<(), CoreError> {
+    let (client_id, secret) = creds(config)?;
+    let url = format!("{}/screenshots", config.api_base_url.trim_end_matches('/'));
+    let part = multipart::Part::bytes(frame.jpeg.clone())
+        .file_name(frame.file_name.clone())
+        .mime_str("image/jpeg")
+        .map_err(|e| CoreError::Config(e.to_string()))?;
+    let mut form = multipart::Form::new()
+        .text("is_mock", if frame.is_mock { "true" } else { "false" })
+        .text("captured_at", frame.captured_at.clone());
+    if let Some(x) = frame.mouse_x {
+        form = form.text("mouse_x", format!("{x:.6}"));
+    }
+    if let Some(y) = frame.mouse_y {
+        form = form.text("mouse_y", format!("{y:.6}"));
+    }
+    if let Some(b) = frame.mouse_buttons {
+        form = form.text("mouse_buttons", b.to_string());
+    }
+    if let Some(action) = &frame.mouse_action {
+        form = form.text("mouse_action", action.clone());
+    }
+    let res = batch_client()?
+        .post(url)
+        .basic_auth(client_id, Some(secret))
+        .multipart(form.part("file", part))
+        .send()
+        .map_err(|e| CoreError::Config(format!("upload failed: {e}")))?;
+    if !res.status().is_success() {
+        let text = res.text().unwrap_or_default();
+        return Err(CoreError::Config(format!("upload rejected: {text}")));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchAccepted {
+    accepted_files: Vec<String>,
+}
+
+fn batch_client() -> Result<Client, CoreError> {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| CoreError::Config(format!("http client: {e}")))
+}
+
 pub fn post_activity(config: &AgentConfig, events: &[ActivityEventIn]) -> Result<(), CoreError> {
     let (client_id, secret) = creds(config)?;
     let url = format!(

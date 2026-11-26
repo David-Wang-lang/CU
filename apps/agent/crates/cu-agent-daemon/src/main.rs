@@ -3,14 +3,14 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 mod win_service;
 
-use cu_agent_core::api::{post_activity, upload_screenshot, ActivityEventIn, HeartbeatRequest};
+use cu_agent_core::api::{post_activity, upload_screenshot_batch, ActivityEventIn, BatchFrame, HeartbeatRequest};
 use cu_agent_core::config::{config_dir, load_config};
 use cu_agent_core::{AgentConfig, CoreError};
 use serde_json::json;
@@ -64,26 +64,17 @@ fn run() -> Result<(), CoreError> {
         let authorized = authorized.clone();
         thread::spawn(move || heartbeat_loop(config, authorized));
     }
-    let (tx, rx) = mpsc::sync_channel::<cu_agent_core::MockScreenshotMeta>(60);
     {
         let config = config.clone();
-        thread::spawn(move || upload_loop(config, rx));
+        thread::spawn(move || batch_upload_loop(config));
     }
 
     let interval = Duration::from_secs(1);
     loop {
         let started = Instant::now();
         if authorized.load(Ordering::Relaxed) {
-            match capture_frame(&config) {
-                Ok(meta) => {
-                    if let Err(mpsc::TrySendError::Full(meta) | mpsc::TrySendError::Disconnected(meta)) =
-                        tx.try_send(meta)
-                    {
-                        let _ = std::fs::remove_file(&meta.path);
-                        daemon_log("capture upload queue is full; dropped one frame");
-                    }
-                }
-                Err(err) => daemon_log(&format!("capture error: {err}")),
+            if let Err(err) = capture_frame(&config) {
+                daemon_log(&format!("capture error: {err}"));
             }
         }
         let elapsed = started.elapsed();
@@ -140,27 +131,96 @@ fn send_heartbeat(config: &mut AgentConfig) -> Result<bool, CoreError> {
     Ok(is_authorized)
 }
 
-fn capture_frame(config: &AgentConfig) -> Result<cu_agent_core::MockScreenshotMeta, CoreError> {
-    let dir = mock_output_dir()?;
-    platform_capture(&dir, config.mock_screenshots)
+fn capture_frame(config: &AgentConfig) -> Result<(), CoreError> {
+    let root = config_dir()?;
+    let shots = root.join("captures");
+    std::fs::create_dir_all(&shots)?;
+    let meta = platform_capture(&shots, config.mock_screenshots)?;
+    let queue = root.join("queue");
+    cu_agent_core::spool::enqueue(&queue, &meta)?;
+    let dropped = cu_agent_core::spool::prune(&queue, cu_agent_core::spool::MAX_QUEUED_FRAMES)?;
+    if dropped > 0 {
+        daemon_log(&format!("queue full; dropped {dropped} oldest frames"));
+    }
+    Ok(())
 }
 
-fn upload_loop(config: AgentConfig, rx: mpsc::Receiver<cu_agent_core::MockScreenshotMeta>) {
-    while let Ok(meta) = rx.recv() {
-        let uploaded = upload_screenshot(
-            &config,
-            &meta.path,
-            meta.is_mock,
-            meta.mouse_x,
-            meta.mouse_y,
-            meta.mouse_buttons,
-            meta.mouse_action.as_deref(),
-        );
-        let _ = std::fs::remove_file(&meta.path);
-        if let Err(err) = uploaded {
-            daemon_log(&format!("upload error: {err}"));
+fn batch_upload_loop(config: AgentConfig) {
+    if let Ok(root) = config_dir() {
+        let _ = cu_agent_core::spool::remove_loose_images(&root.join("captures"));
+        let _ = cu_agent_core::spool::remove_loose_images(&root.join("queue"));
+    }
+    let mut backoff = Duration::from_secs(15);
+    loop {
+        match flush_batch(&config) {
+            Ok(0) => thread::sleep(Duration::from_secs(5)),
+            Ok(sent) => {
+                daemon_log(&format!("uploaded batch of {sent} frames"));
+                backoff = Duration::from_secs(15);
+            }
+            Err(err) => {
+                daemon_log(&format!("batch upload error: {err}"));
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(120));
+            }
         }
     }
+}
+
+fn flush_batch(config: &AgentConfig) -> Result<usize, CoreError> {
+    let queue = config_dir()?.join("queue");
+    let paths = cu_agent_core::spool::list_frames(&queue)?;
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let oldest = paths[0].clone();
+    let age = oldest
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .unwrap_or(Duration::from_secs(0));
+    if paths.len() < 60 && age < Duration::from_secs(60) {
+        return Ok(0);
+    }
+    let selected: Vec<_> = paths.into_iter().take(60).collect();
+    let mut frames = Vec::new();
+    let mut paths_by_name = Vec::new();
+    for (index, path) in selected.iter().enumerate() {
+        let queued = match cu_agent_core::spool::read_frame(path) {
+            Ok(frame) => frame,
+            Err(err) => {
+                daemon_log(&format!("dropping unreadable queue file: {err}"));
+                let _ = std::fs::remove_file(path);
+                continue;
+            }
+        };
+        let file_name = format!("{index}.jpg");
+        paths_by_name.push((file_name.clone(), path.clone()));
+        frames.push(BatchFrame {
+            file_name,
+            jpeg: queued.jpeg,
+            captured_at: queued.captured_at,
+            is_mock: queued.is_mock,
+            mouse_x: queued.mouse_x,
+            mouse_y: queued.mouse_y,
+            mouse_buttons: queued.mouse_buttons,
+            mouse_action: queued.mouse_action,
+        });
+    }
+    if frames.is_empty() {
+        return Ok(0);
+    }
+    let accepted = upload_screenshot_batch(config, &frames)?;
+    let accepted: std::collections::HashSet<_> = accepted.into_iter().collect();
+    let mut sent = 0;
+    for (name, path) in paths_by_name {
+        if accepted.contains(&name) {
+            let _ = std::fs::remove_file(path);
+            sent += 1;
+        }
+    }
+    Ok(sent)
 }
 
 fn sample_resources() -> (Option<f32>, Option<f32>, Option<f32>) {
@@ -187,12 +247,6 @@ fn sample_resources() -> (Option<f32>, Option<f32>, Option<f32>) {
         }
     });
     (Some(cpu), Some(mem), disk)
-}
-
-fn mock_output_dir() -> Result<PathBuf, CoreError> {
-    let dir = config_dir()?.join("captures");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 fn platform_capture(
