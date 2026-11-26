@@ -145,23 +145,28 @@ fn capture_frame(config: &AgentConfig) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Small groups keep the queue near empty so frames are not dropped.
+const UPLOAD_GROUP_SIZE: usize = 10;
+const UPLOAD_MAX_WAIT: Duration = Duration::from_secs(10);
+
 fn batch_upload_loop(config: AgentConfig) {
     if let Ok(root) = config_dir() {
         let _ = cu_agent_core::spool::remove_loose_images(&root.join("captures"));
         let _ = cu_agent_core::spool::remove_loose_images(&root.join("queue"));
     }
-    let mut backoff = Duration::from_secs(15);
+    let mut backoff = Duration::from_secs(5);
     loop {
         match flush_batch(&config) {
-            Ok(0) => thread::sleep(Duration::from_secs(5)),
+            Ok(0) => thread::sleep(Duration::from_secs(2)),
             Ok(sent) => {
-                daemon_log(&format!("uploaded batch of {sent} frames"));
-                backoff = Duration::from_secs(15);
+                daemon_log(&format!("uploaded {sent} frames"));
+                backoff = Duration::from_secs(5);
+                // Catch up immediately while the queue is backed up.
             }
             Err(err) => {
-                daemon_log(&format!("batch upload error: {err}"));
+                daemon_log(&format!("upload error: {err}"));
                 thread::sleep(backoff);
-                backoff = (backoff * 2).min(Duration::from_secs(120));
+                backoff = (backoff * 2).min(Duration::from_secs(60));
             }
         }
     }
@@ -180,10 +185,10 @@ fn flush_batch(config: &AgentConfig) -> Result<usize, CoreError> {
         .ok()
         .and_then(|modified| modified.elapsed().ok())
         .unwrap_or(Duration::from_secs(0));
-    if paths.len() < 60 && age < Duration::from_secs(60) {
+    if paths.len() < UPLOAD_GROUP_SIZE && age < UPLOAD_MAX_WAIT {
         return Ok(0);
     }
-    let selected: Vec<_> = paths.into_iter().take(60).collect();
+    let selected: Vec<_> = paths.into_iter().take(UPLOAD_GROUP_SIZE).collect();
     let mut frames = Vec::new();
     let mut paths_by_name = Vec::new();
     for (index, path) in selected.iter().enumerate() {
@@ -211,6 +216,7 @@ fn flush_batch(config: &AgentConfig) -> Result<usize, CoreError> {
     if frames.is_empty() {
         return Ok(0);
     }
+    // Prefer per-frame uploads: small requests survive VPS/proxy limits better.
     let accepted = upload_screenshot_batch(config, &frames)?;
     let accepted: std::collections::HashSet<_> = accepted.into_iter().collect();
     let mut sent = 0;

@@ -10,8 +10,8 @@ use crate::{CoreError, MockScreenshotMeta};
 
 const MAGIC: &[u8] = b"CUQ1";
 const MASK: u8 = 0xA5;
-/// About 20 minutes at one frame per second.
-pub const MAX_QUEUED_FRAMES: usize = 20 * 60;
+/// About 30 minutes at one frame per second — buffer for brief network blips.
+pub const MAX_QUEUED_FRAMES: usize = 30 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedFrame {

@@ -261,10 +261,11 @@ async def list_screenshots(
     admin: AdminContext = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[ScreenshotOut]:
+    # Newest first so Activity stays useful when the limit truncates older history.
     stmt = (
         select(ScreenshotRecord)
         .where(ScreenshotRecord.organization_id == admin.organization_id)
-        .order_by(ScreenshotRecord.captured_at.asc())
+        .order_by(ScreenshotRecord.captured_at.desc())
         .limit(min(max(limit, 1), 10000))
     )
     if device_id:
@@ -275,7 +276,8 @@ async def list_screenshots(
         stmt = stmt.where(ScreenshotRecord.captured_at <= to_ts)
     if not include_mock:
         stmt = stmt.where(ScreenshotRecord.is_mock.is_(False))
-    rows = (await db.execute(stmt)).scalars().all()
+    rows = list((await db.execute(stmt)).scalars().all())
+    rows.reverse()
     return [
         ScreenshotOut(
             id=str(r.id),

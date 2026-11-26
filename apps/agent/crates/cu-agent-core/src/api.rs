@@ -174,9 +174,9 @@ pub struct BatchFrame {
     pub mouse_action: Option<String>,
 }
 
-/// Upload up to one minute of frames in a single request.
-/// Returns the file names the server stored. If batch is missing or the large
-/// multipart fails (common before the VPS is updated), fall back to one-by-one.
+/// Upload a small group of frames.
+/// Prefer one-by-one first (more reliable on constrained proxies). If that
+/// fails completely, try the batch endpoint as a second chance.
 pub fn upload_screenshot_batch(
     config: &AgentConfig,
     frames: &[BatchFrame],
@@ -184,13 +184,18 @@ pub fn upload_screenshot_batch(
     if frames.is_empty() {
         return Ok(Vec::new());
     }
-    match try_upload_screenshot_batch(config, frames) {
-        Ok(accepted) => Ok(accepted),
-        Err(batch_err) => match upload_frames_individually(config, frames) {
+    match upload_frames_individually(config, frames) {
+        Ok(accepted) if accepted.len() == frames.len() => Ok(accepted),
+        Ok(partial) if !partial.is_empty() => Ok(partial),
+        Ok(_) | Err(_) => match try_upload_screenshot_batch(config, frames) {
             Ok(accepted) => Ok(accepted),
-            Err(single_err) => Err(CoreError::Config(format!(
-                "batch failed ({batch_err}); single upload also failed: {single_err}"
-            ))),
+            Err(batch_err) => match upload_frames_individually(config, frames) {
+                Ok(accepted) if !accepted.is_empty() => Ok(accepted),
+                Ok(_) => Err(batch_err),
+                Err(single_err) => Err(CoreError::Config(format!(
+                    "upload failed ({batch_err}); retry also failed: {single_err}"
+                ))),
+            },
         },
     }
 }
