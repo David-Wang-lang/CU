@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+target/
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs & coverage
+*.log
+logs/
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.next/
+out/
+*.tsbuildinfo
+
+# Agent / Tauri
+apps/agent/src-tauri/target/
+apps/agent/src-tauri/gen/
+apps/agent/dist/
+
+# Docker / local data
+.minio/
+postgres-data/
+redis-data/
+
+# OS
+Thumbs.db
+
+# Misc
+*.pem
+*.key
+.turbo/
+apps/agent/target/
+apps/api/data/
+
+.dev-logs/
+.dev-pids/

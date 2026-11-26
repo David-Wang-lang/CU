@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Lint
+        run: uv run ruff check app tests
+      - name: Test
+        run: uv run pytest -q
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm --filter @cu/dashboard typecheck
+      - name: Lint
+        run: pnpm --filter @cu/dashboard lint
+      - name: Build
+        run: pnpm --filter @cu/dashboard build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+
+  agent-core:
+    name: Agent core (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test cu-agent-core
+        working-directory: apps/agent
+        run: cargo test -p cu-agent-core
+      - name: Check cu-agent-daemon
+        working-directory: apps/agent
+        run: cargo check -p cu-agent-daemon
+
+  agent-build:
+    name: Agent check (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-intel
+            os: macos-13
+            target: x86_64-apple-darwin
+          - name: macos-arm
+            os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+      - name: Install Linux WebKit deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Cargo check daemon
+        working-directory: apps/agent
+        run: cargo check -p cu-agent-daemon --target ${{ matrix.target }}
+      - name: Cargo check setup wizard (Tauri)
+        working-directory: apps/agent
+        run: cargo check -p cu-agent --target ${{ matrix.target }}

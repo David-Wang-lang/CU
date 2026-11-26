@@ -1,0 +1,11 @@
+[package]
+name = "cu-platform-windows"
+version = "0.1.0"
+edition = "2021"
+description = "Windows-specific CU agent integrations (stubs in Phase 1)"
+
+[dependencies]
+cu-agent-core = { path = "../cu-agent-core" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Phase 4: windows crate / DXGI capture

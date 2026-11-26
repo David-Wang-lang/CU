@@ -1,0 +1,22 @@
+{
+  "name": "cu",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CU — Enterprise Endpoint Monitoring & DLP Platform",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:dashboard": "pnpm --filter @cu/dashboard dev",
+    "dev:agent-setup": "pnpm --filter @cu/agent setup:dev",
+    "dev:agent": "pnpm --filter @cu/agent setup:dev",
+    "dev:agent-daemon": "pnpm --filter @cu/agent daemon:run",
+    "build:dashboard": "pnpm --filter @cu/dashboard build",
+    "build:agent-setup": "pnpm --filter @cu/agent setup:build",
+    "build:agent": "pnpm --filter @cu/agent setup:build",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

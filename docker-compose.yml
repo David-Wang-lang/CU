@@ -1,0 +1,171 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cu_dev_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-cu}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cu} -d ${POSTGRES_DB:-cu}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin_change_me};
+      mc mb --ignore-existing local/$${S3_BUCKET:-cu-monitoring};
+      mc anonymous set none local/$${S3_BUCKET:-cu-monitoring};
+      exit 0;
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_change_me}
+      S3_BUCKET: ${S3_BUCKET:-cu-monitoring}
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cu}:${POSTGRES_PASSWORD:-cu_dev_password_change_me}@postgres:5432/${POSTGRES_DB:-cu}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      S3_ENDPOINT_URL: http://minio:9000
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker --loglevel=INFO
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cu}:${POSTGRES_PASSWORD:-cu_dev_password_change_me}@postgres:5432/${POSTGRES_DB:-cu}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      S3_ENDPOINT_URL: http://minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.api
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app beat --loglevel=INFO
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cu}:${POSTGRES_PASSWORD:-cu_dev_password_change_me}@postgres:5432/${POSTGRES_DB:-cu}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.dashboard
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_started
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - dashboard
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

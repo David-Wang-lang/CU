@@ -1,0 +1,16 @@
+[workspace]
+members = [
+  "src-tauri",
+  "crates/cu-agent-core",
+  "crates/cu-agent-daemon",
+  "crates/cu-platform-macos",
+  "crates/cu-platform-windows",
+]
+resolver = "2"
+
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+

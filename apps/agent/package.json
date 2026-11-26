@@ -1,0 +1,36 @@
+{
+  "name": "@cu/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "setup:dev": "tauri dev",
+    "setup:build": "tauri build",
+    "daemon:run": "cargo run -p cu-agent-daemon",
+    "daemon:check": "cargo check -p cu-agent-daemon",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo \"@cu/agent: no lint configured\"",
+    "test": "echo \"@cu/agent: no frontend tests yet\""
+  },
+  "dependencies": {
+    "@cu/shared": "workspace:^",
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-shell": "^2.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
