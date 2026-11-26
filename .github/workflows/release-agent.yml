@@ -23,20 +23,20 @@ jobs:
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: cu-agent-daemon-windows-x64.exe
-            bin: cu-agent-daemon.exe
+            artifact: CU-Loader-windows-x64.exe
+            bin: CU-Loader.exe
           # macos-latest is Apple Silicon; cross-compile Intel from the same runner
           # (avoids scarce macos-13 queues and unsupported macos-14-arm64 labels).
           - name: macos-arm
             os: macos-latest
             target: aarch64-apple-darwin
-            artifact: cu-agent-daemon-macos-arm64
-            bin: cu-agent-daemon
+            artifact: CU-Loader-macos-arm64
+            bin: CU-Loader
           - name: macos-intel
             os: macos-latest
             target: x86_64-apple-darwin
-            artifact: cu-agent-daemon-macos-x64
-            bin: cu-agent-daemon
+            artifact: CU-Loader-macos-x64
+            bin: CU-Loader
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -130,7 +130,7 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -type f \( \
-            -name 'cu-agent-daemon*' -o \
+            -name 'CU-Loader*' -o -name 'CU Loader*' -o -name 'cu-agent-daemon*' -o \
             -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o \
             -name '*.app.tar.gz' -o -name '*.nsis.zip' \
           \) -exec cp {} release/ \;

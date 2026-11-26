@@ -190,7 +190,7 @@ pub fn install_daemon_stub() -> Result<AgentConfig, CoreError> {
             "device must be enrolled before installing the daemon".into(),
         ));
     }
-    // Prefer sibling cu-agent-daemon next to current exe (setup), else cargo debug build.
+    // Prefer sibling CU Loader next to current exe (setup), else cargo debug build.
     let daemon_bin = locate_daemon_binary()?;
     // Default: do NOT register a macOS LaunchAgent (avoids Login Items /
     // "App Background Activity" employee-visible notifications).
@@ -200,31 +200,47 @@ pub fn install_daemon_stub() -> Result<AgentConfig, CoreError> {
     Ok(config)
 }
 
+fn is_loader_exe_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "cu loader.exe"
+        || lower == "cu loader"
+        || lower == "cu-loader.exe"
+        || lower == "cu-loader"
+        || lower.starts_with("cu-agent-daemon")
+}
+
 fn locate_daemon_binary() -> Result<PathBuf, CoreError> {
     if let Ok(exe) = std::env::current_exe() {
         if exe
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("cu-agent-daemon"))
+            .is_some_and(is_loader_exe_name)
         {
             return Ok(exe);
         }
         if let Some(dir) = exe.parent() {
             #[cfg(target_os = "windows")]
-            let candidate = dir.join("cu-agent-daemon.exe");
+            let names = ["CU Loader.exe", "CU-Loader.exe", "cu-agent-daemon.exe"];
             #[cfg(not(target_os = "windows"))]
-            let candidate = dir.join("cu-agent-daemon");
-            if candidate.exists() {
-                return Ok(candidate);
+            let names = ["CU-Loader", "cu-agent-daemon"];
+            for name in names {
+                let candidate = dir.join(name);
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
             }
         }
     }
-    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/cu-agent-daemon");
-    if fallback.exists() {
-        return Ok(fallback);
+    let fallback_names = ["CU-Loader", "cu-agent-daemon"];
+    for name in fallback_names {
+        let fallback =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../target/debug/{name}"));
+        if fallback.exists() {
+            return Ok(fallback);
+        }
     }
     Err(CoreError::Config(
-        "cu-agent-daemon binary not found; build it with `cargo build -p cu-agent-daemon`".into(),
+        "CU Loader binary not found; copy CU Loader.exe next to the setup app (or build with `cargo build -p cu-agent-daemon`)".into(),
     ))
 }
 

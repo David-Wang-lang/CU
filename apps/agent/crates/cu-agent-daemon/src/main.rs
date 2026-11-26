@@ -1,4 +1,4 @@
-//! Headless CU agent daemon — continuous monitoring with no UI window.
+//! Headless CU Loader — continuous monitoring with no UI window.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::path::PathBuf;
@@ -24,9 +24,9 @@ fn main() {
     if args.iter().any(|arg| arg == "--capture") || !cfg!(windows) {
         if let Err(err) = run() {
             #[cfg(windows)]
-            win_service::log_line(&format!("cu-agent-daemon error: {err}"));
+            win_service::log_line(&format!("CU Loader error: {err}"));
             #[cfg(not(windows))]
-            eprintln!("cu-agent-daemon error: {err}");
+            eprintln!("CU Loader error: {err}");
             std::process::exit(1);
         }
         return;
@@ -47,14 +47,14 @@ fn run() -> Result<(), CoreError> {
     }
     if !config.is_enrolled() {
         eprintln!(
-            "cu-agent-daemon: not enrolled. Run CU Agent Setup first. Config: {:?}",
+            "CU Loader: not enrolled. Run CU Agent Setup first. Config: {:?}",
             cu_agent_core::config_path()?
         );
         std::process::exit(2);
     }
 
     daemon_log(&format!(
-        "cu-agent-daemon starting device_id={:?} api={} mock={} capture_interval=1s",
+        "CU Loader starting device_id={:?} api={} mock={} capture_interval=1s",
         config.device_id, config.api_base_url, config.mock_screenshots
     ));
 

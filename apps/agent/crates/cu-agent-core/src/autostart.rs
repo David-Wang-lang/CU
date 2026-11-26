@@ -132,7 +132,7 @@ fn install_macos_launch_agent(daemon_bin: PathBuf) -> Result<PathBuf, CoreError>
 fn install_windows_stub(daemon_bin: PathBuf) -> Result<PathBuf, CoreError> {
     if !daemon_bin.exists() {
         return Err(CoreError::Config(format!(
-            "cu-agent-daemon binary not found at {}. Copy cu-agent-daemon.exe next to the setup app.",
+            "CU Loader binary not found at {}. Copy CU Loader.exe next to the setup app.",
             daemon_bin.display()
         )));
     }

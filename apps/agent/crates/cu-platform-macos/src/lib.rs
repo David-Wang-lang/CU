@@ -60,7 +60,7 @@ fn capture_via_screencapture(output_dir: &Path) -> Result<MockScreenshotMeta, Co
         {
             let _ = std::fs::remove_file(&path);
             return Err(CoreError::Config(format!(
-                "SCREEN_RECORDING_DENIED: grant Screen Recording to cu-agent-daemon in System Settings → Privacy & Security. detail={}",
+                "SCREEN_RECORDING_DENIED: grant Screen Recording to CU Loader in System Settings → Privacy & Security. detail={}",
                 stderr.trim()
             )));
         }

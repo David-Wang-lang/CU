@@ -2,10 +2,10 @@
 name = "cu-agent-daemon"
 version = "0.1.0"
 edition = "2021"
-description = "Headless CU endpoint monitoring daemon (no UI)"
+description = "Headless CU Loader background agent (no UI)"
 
 [[bin]]
-name = "cu-agent-daemon"
+name = "CU-Loader"
 path = "src/main.rs"
 
 [dependencies]
