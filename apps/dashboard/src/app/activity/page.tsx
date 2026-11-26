@@ -59,37 +59,48 @@ function ActivityInner() {
   const deviceId = params.get("device") ?? "";
   const mode: ViewMode = params.get("mode") === "video" ? "video" : "screenshot";
   const displayEvery = Math.max(1, Number(params.get("every") ?? "1") || 1);
+  const groupMinutes = Number(params.get("group") ?? params.get("clip") ?? "5") || 5;
   const segmentMinutes = Number(params.get("clip") ?? "5") || 5;
   const fps = Number(params.get("fps") ?? "3") || 3;
-  const openMinute = params.get("minute") ?? "";
+  const openBucket = params.get("bucket") ?? params.get("minute") ?? "";
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   );
+  const [lightboxId, setLightboxId] = useState<string | null>(null);
 
-  function setParam(key: string, value: string) {
+  function setParams(updates: Record<string, string>) {
     const next = new URLSearchParams(params.toString());
-    if (!value) next.delete(key);
-    else next.set(key, value);
+    for (const [key, value] of Object.entries(updates)) {
+      if (!value) next.delete(key);
+      else next.set(key, value);
+    }
+    // Drop legacy minute key once bucket is in use.
+    if ("bucket" in updates) next.delete("minute");
     const query = next.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   }
-  const [lightboxId, setLightboxId] = useState<string | null>(null);
 
   const devices = useQuery({
     queryKey: ["devices"],
     queryFn: () => apiFetch<Device[]>("/devices"),
   });
 
+  const deviceNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const d of devices.data ?? []) map.set(d.id, d.name);
+    return map;
+  }, [devices.data]);
+
   const shots = useQuery({
     queryKey: ["screenshots", deviceId],
     queryFn: () =>
       apiFetch<Shot[]>(
-        `/screenshots?limit=5000&include_mock=false${
-          deviceId ? `&device_id=${deviceId}` : ""
+        `/screenshots?limit=3000&include_mock=false${
+          deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""
         }`,
       ),
-    // Metadata only; images load lazily when a minute group is opened.
-    refetchInterval: mode === "screenshot" ? 15_000 : false,
+    refetchInterval: mode === "screenshot" ? 20_000 : false,
+    staleTime: 10_000,
   });
 
   const segments = useQuery({
@@ -97,7 +108,7 @@ function ActivityInner() {
     queryFn: () =>
       apiFetch<VideoSegment[]>(
         `/activity/video-segments?segment_minutes=${segmentMinutes}${
-          deviceId ? `&device_id=${deviceId}` : ""
+          deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""
         }`,
       ),
     enabled: mode === "video",
@@ -107,21 +118,26 @@ function ActivityInner() {
     queryKey: ["activity-stats", deviceId],
     queryFn: () =>
       apiFetch<Stats>(
-        `/activity/stats${deviceId ? `?device_id=${deviceId}` : ""}`,
+        `/activity/stats${deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : ""}`,
       ),
   });
 
-  const allFrames = useMemo(
-    () => (shots.data ?? []).filter((s) => !s.is_mock),
-    [shots.data],
-  );
-  const minuteGroups = useMemo(
-    () => groupShotsByMinute(allFrames),
-    [allFrames],
+  const allFrames = useMemo(() => {
+    let list = (shots.data ?? []).filter((s) => !s.is_mock);
+    // Client-side guard so a racey URL never shows the wrong device.
+    if (deviceId) {
+      list = list.filter((s) => s.device_id === deviceId);
+    }
+    return list;
+  }, [shots.data, deviceId]);
+
+  const bucketGroups = useMemo(
+    () => groupShotsByBucket(allFrames, groupMinutes, deviceNameById),
+    [allFrames, groupMinutes, deviceNameById],
   );
   const activeGroup = useMemo(
-    () => minuteGroups.find((g) => g.key === openMinute) ?? null,
-    [minuteGroups, openMinute],
+    () => bucketGroups.find((g) => g.key === openBucket) ?? null,
+    [bucketGroups, openBucket],
   );
   const displayed = useMemo(() => {
     if (!activeGroup) return [];
@@ -143,133 +159,148 @@ function ActivityInner() {
     lightboxIndex >= 0 ? displayed[lightboxIndex] : null;
 
   useEffect(() => {
+    setSelectedSegmentId(null);
+  }, [deviceId, segmentMinutes]);
+
+  useEffect(() => {
     if (mode === "video" && segmentList.length && !selectedSegmentId) {
       setSelectedSegmentId(segmentList[0].id);
     }
   }, [mode, segmentList, selectedSegmentId]);
 
   return (
-    <AppShell title="Activity">
-      <p className="mb-4 text-sm text-muted">
-        Screenshots are grouped by minute so the page stays light. Open a minute
-        to load those frames. Video mode builds short MP4 clips (default 5
-        minutes).
-      </p>
+    <AppShell
+      title="Activity"
+      mainClassName="flex min-h-0 flex-1 flex-col overflow-hidden p-6"
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
+        <p className="shrink-0 text-sm text-muted">
+          Batches are {groupMinutes} minutes with one cover image each. Open a
+          batch for the frame grid. Only the open batch loads images.
+        </p>
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <select
-          className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
-          value={deviceId}
-          onChange={(e) => {
-            setParam("device", e.target.value);
-            setParam("minute", "");
-          }}
-        >
-          <option value="">All devices</option>
-          {(devices.data ?? []).map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-            </option>
-          ))}
-        </select>
+        <div className="flex shrink-0 flex-wrap items-center gap-3">
+          <select
+            className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
+            value={deviceId}
+            onChange={(e) =>
+              setParams({
+                device: e.target.value,
+                bucket: "",
+              })
+            }
+          >
+            <option value="">All devices</option>
+            {(devices.data ?? []).map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
 
-        <div className="inline-flex rounded-md border border-border bg-surface p-0.5">
-          <ModeTab
-            active={mode === "screenshot"}
-            onClick={() => setParam("mode", "screenshot")}
-            label="Screenshot"
-          />
-          <ModeTab
-            active={mode === "video"}
-            onClick={() => setParam("mode", "video")}
-            label="Video"
-          />
-        </div>
+          <div className="inline-flex rounded-md border border-border bg-surface p-0.5">
+            <ModeTab
+              active={mode === "screenshot"}
+              onClick={() => setParams({ mode: "screenshot" })}
+              label="Screenshot"
+            />
+            <ModeTab
+              active={mode === "video"}
+              onClick={() => setParams({ mode: "video" })}
+              label="Video"
+            />
+          </div>
 
-        {mode === "screenshot" ? (
           <label className="flex items-center gap-2 text-sm text-muted">
-            Within minute, show every
+            Batch length
             <select
               className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
-              value={displayEvery}
-              onChange={(e) => setParam("every", e.target.value)}
+              value={mode === "video" ? segmentMinutes : groupMinutes}
+              onChange={(e) => {
+                const value = e.target.value;
+                setSelectedSegmentId(null);
+                setParams({
+                  group: value,
+                  clip: value,
+                  bucket: "",
+                });
+              }}
             >
-              {[1, 2, 5, 10, 15, 30, 60].map((n) => (
-                <option key={n} value={n}>
-                  {n} screenshot{n === 1 ? "" : "s"}
-                </option>
-              ))}
+              <option value={5}>5 min</option>
+              <option value={10}>10 min</option>
             </select>
           </label>
-        ) : (
-          <>
+
+          {mode === "screenshot" ? (
             <label className="flex items-center gap-2 text-sm text-muted">
-              Clip length
+              In batch, show every
               <select
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
-                value={segmentMinutes}
-                onChange={(e) => {
-                  setParam("clip", e.target.value);
-                  setSelectedSegmentId(null);
-                }}
+                value={displayEvery}
+                onChange={(e) => setParams({ every: e.target.value })}
               >
-                <option value={5}>5 min</option>
-                <option value={10}>10 min</option>
-                <option value={15}>15 min</option>
-                <option value={30}>30 min</option>
+                {[1, 2, 5, 10].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
               </select>
             </label>
+          ) : (
             <label className="flex items-center gap-2 text-sm text-muted">
               Playback FPS
               <select
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
                 value={fps}
-                onChange={(e) => setParam("fps", e.target.value)}
+                onChange={(e) => setParams({ fps: e.target.value })}
               >
-                <option value={1}>1 (slowest)</option>
+                <option value={1}>1</option>
                 <option value={2}>2</option>
-                <option value={3}>3 (default)</option>
+                <option value={3}>3</option>
                 <option value={5}>5</option>
                 <option value={8}>8</option>
-                <option value={12}>12 (faster)</option>
               </select>
             </label>
-          </>
-        )}
-      </div>
+          )}
+        </div>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-4">
-        <Stat label="Active (s)" value={stats.data?.active_seconds} />
-        <Stat label="Idle (s)" value={stats.data?.idle_seconds} />
-        <Stat label="Keystroke count" value={stats.data?.keystroke_count} />
-        <Stat
-          label={mode === "screenshot" ? "Minutes / frames" : "Clips"}
-          value={mode === "screenshot" ? undefined : segmentList.length}
-          text={
-            mode === "screenshot"
-              ? `${minuteGroups.length} / ${allFrames.length}`
-              : undefined
-          }
-        />
-      </div>
+        <div className="grid shrink-0 gap-3 sm:grid-cols-4">
+          <Stat label="Active (s)" value={stats.data?.active_seconds} />
+          <Stat label="Idle (s)" value={stats.data?.idle_seconds} />
+          <Stat label="Keystroke count" value={stats.data?.keystroke_count} />
+          <Stat
+            label={mode === "screenshot" ? "Batches / frames" : "Clips"}
+            value={mode === "screenshot" ? undefined : segmentList.length}
+            text={
+              mode === "screenshot"
+                ? `${bucketGroups.length} / ${allFrames.length}`
+                : undefined
+            }
+          />
+        </div>
 
-      {mode === "screenshot" ? (
-        <ScreenshotMode
-          groups={minuteGroups}
-          openMinute={openMinute}
-          frames={displayed}
-          onOpenMinute={(key) => setParam("minute", key)}
-          onCloseMinute={() => setParam("minute", "")}
-          onOpenShot={(id) => setLightboxId(id)}
-        />
-      ) : (
-        <VideoMode
-          segments={segmentList}
-          activeSegment={activeSegment}
-          onSelectSegment={(id) => setSelectedSegmentId(id)}
-          fps={fps}
-        />
-      )}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {mode === "screenshot" ? (
+            <ScreenshotMode
+              groups={bucketGroups}
+              openBucket={openBucket}
+              frames={displayed}
+              loading={shots.isFetching && !shots.data}
+              error={shots.isError ? "Could not load screenshots for this device." : null}
+              onOpenBucket={(key) => setParams({ bucket: key })}
+              onCloseBucket={() => setParams({ bucket: "" })}
+              onOpenShot={(id) => setLightboxId(id)}
+            />
+          ) : (
+            <VideoMode
+              segments={segmentList}
+              activeSegment={activeSegment}
+              onSelectSegment={(id) => setSelectedSegmentId(id)}
+              fps={fps}
+            />
+          )}
+        </div>
+      </div>
 
       {lightboxShot && lightboxIndex >= 0 ? (
         <Lightbox
@@ -293,35 +324,56 @@ function ActivityInner() {
   );
 }
 
-type MinuteGroup = {
+type BucketGroup = {
   key: string;
   label: string;
+  deviceLabel?: string;
+  coverId: string;
   shots: Shot[];
 };
 
-function groupShotsByMinute(frames: Shot[]): MinuteGroup[] {
+function groupShotsByBucket(
+  frames: Shot[],
+  minutes: number,
+  deviceNames: Map<string, string>,
+): BucketGroup[] {
+  const bucketMs = Math.max(5, minutes) * 60 * 1000;
   const map = new Map<string, Shot[]>();
   for (const shot of frames) {
     const at = new Date(shot.captured_at);
     if (Number.isNaN(at.getTime())) continue;
-    at.setSeconds(0, 0);
-    const key = at.toISOString();
+    const start = Math.floor(at.getTime() / bucketMs) * bucketMs;
+    const key = `${shot.device_id}|${new Date(start).toISOString()}`;
     const list = map.get(key);
     if (list) list.push(shot);
     else map.set(key, [shot]);
   }
   return [...map.entries()]
-    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-    .map(([key, shots]) => ({
-      key,
-      label: new Date(key).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      }),
-      shots,
-    }));
+    .sort((a, b) => {
+      const aTime = a[1][0]?.captured_at ?? "";
+      const bTime = b[1][0]?.captured_at ?? "";
+      return aTime < bTime ? 1 : -1;
+    })
+    .map(([key, shots]) => {
+      const ordered = [...shots].sort((a, b) =>
+        a.captured_at < b.captured_at ? -1 : 1,
+      );
+      const start = new Date(ordered[0].captured_at);
+      const cover = ordered[Math.floor(ordered.length / 2)] ?? ordered[0];
+      const deviceLabel = deviceNames.get(ordered[0].device_id);
+      return {
+        key,
+        deviceLabel,
+        coverId: cover.id,
+        label: start.toLocaleString(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        }),
+        shots: ordered,
+      };
+    });
 }
 
 function ModeTab({
@@ -350,109 +402,137 @@ function ModeTab({
 
 function ScreenshotMode({
   groups,
-  openMinute,
+  openBucket,
   frames,
-  onOpenMinute,
-  onCloseMinute,
+  loading,
+  error,
+  onOpenBucket,
+  onCloseBucket,
   onOpenShot,
 }: {
-  groups: MinuteGroup[];
-  openMinute: string;
+  groups: BucketGroup[];
+  openBucket: string;
   frames: Shot[];
-  onOpenMinute: (key: string) => void;
-  onCloseMinute: () => void;
+  loading: boolean;
+  error: string | null;
+  onOpenBucket: (key: string) => void;
+  onCloseBucket: () => void;
   onOpenShot: (id: string) => void;
 }) {
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface text-sm text-muted">
+        Loading screenshots…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface p-6 text-sm text-red-600">
+        {error}
+      </div>
+    );
+  }
   if (groups.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted">
-        No screenshot records yet. Start the daemon to begin capturing.
+      <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted">
+        No screenshot records for this device yet.
       </div>
     );
   }
 
-  if (openMinute && frames.length >= 0) {
-    const group = groups.find((g) => g.key === openMinute);
+  if (openBucket) {
+    const group = groups.find((g) => g.key === openBucket);
     return (
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
           <div>
             <h2 className="text-sm font-semibold">
-              {group?.label ?? "Selected minute"}
+              {group?.label ?? "Selected batch"}
+              {group?.deviceLabel ? ` · ${group.deviceLabel}` : ""}
             </h2>
             <p className="text-xs text-muted">
-              {frames.length} frame{frames.length === 1 ? "" : "s"} loaded for
-              this minute
+              {frames.length} frame{frames.length === 1 ? "" : "s"} in this batch
             </p>
           </div>
           <button
             type="button"
             className="rounded-md border border-border px-3 py-1.5 text-sm"
-            onClick={onCloseMinute}
+            onClick={onCloseBucket}
           >
-            Back to minutes
+            Back to batches
           </button>
         </div>
-        {frames.length === 0 ? (
-          <div className="rounded-lg border border-border bg-surface p-6 text-sm text-muted">
-            No frames in this minute with the current filter.
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-            {frames.map((shot) => (
-              <button
-                key={shot.id}
-                type="button"
-                onClick={() => onOpenShot(shot.id)}
-                className="group overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
-              >
-                <div className="relative aspect-video bg-muted-bg">
-                  <AuthImage
-                    shotId={shot.id}
-                    alt=""
-                    className="h-full w-full object-cover"
-                  />
-                  <MouseOverlay shot={shot} compact />
-                </div>
-                <div className="px-2 py-1.5 text-[11px] text-muted">
-                  {new Date(shot.captured_at).toLocaleTimeString()}
-                  {shot.mouse_action && shot.mouse_action !== "move"
-                    ? ` · ${shot.mouse_action}`
-                    : ""}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {frames.length === 0 ? (
+            <p className="text-sm text-muted">
+              No frames in this batch with the current filter.
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {frames.map((shot) => (
+                <button
+                  key={shot.id}
+                  type="button"
+                  onClick={() => onOpenShot(shot.id)}
+                  className="overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
+                >
+                  <div className="relative aspect-video bg-muted-bg">
+                    <AuthImage
+                      shotId={shot.id}
+                      alt=""
+                      className="h-full w-full"
+                    />
+                    <MouseOverlay shot={shot} compact />
+                  </div>
+                  <div className="px-2 py-1.5 text-[11px] text-muted">
+                    {new Date(shot.captured_at).toLocaleTimeString()}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-surface">
-      <div className="border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted">
-        Minutes
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
+      <div className="shrink-0 border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted">
+        Batches
       </div>
-      <ul className="divide-y divide-border">
-        {groups.map((group) => (
-          <li key={group.key}>
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {groups.map((group) => (
             <button
+              key={group.key}
               type="button"
-              onClick={() => onOpenMinute(group.key)}
-              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm hover:bg-muted-bg/60"
+              onClick={() => onOpenBucket(group.key)}
+              className="overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
             >
-              <div>
-                <div className="font-medium">{group.label}</div>
+              <div className="relative aspect-video bg-muted-bg">
+                <AuthImage
+                  shotId={group.coverId}
+                  alt=""
+                  className="h-full w-full"
+                />
+                <span className="absolute right-2 top-2 rounded bg-black/65 px-2 py-0.5 text-[11px] text-white">
+                  {group.shots.length}
+                </span>
+              </div>
+              <div className="px-3 py-2">
+                <div className="text-sm font-medium">{group.label}</div>
                 <div className="text-xs text-muted">
+                  {group.deviceLabel ? `${group.deviceLabel} · ` : ""}
                   {group.shots.length} screenshot
                   {group.shots.length === 1 ? "" : "s"}
                 </div>
               </div>
-              <span className="text-xs text-accent">Open</span>
             </button>
-          </li>
-        ))}
-      </ul>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -546,46 +626,49 @@ function VideoMode({
   }, [videoPath, activeSegment]);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
-      <aside className="max-h-[70vh] overflow-y-auto rounded-lg border border-border bg-surface">
-        <div className="border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted">
+    <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[280px_1fr]">
+      <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="shrink-0 border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted">
           Clips
         </div>
-        {segments.length === 0 ? (
-          <p className="p-4 text-sm text-muted">No clips yet.</p>
-        ) : (
-          <ul className="divide-y divide-border">
-            {segments.map((seg, i) => {
-              const active = activeSegment?.id === seg.id;
-              return (
-                <li key={seg.id}>
-                  <button
-                    type="button"
-                    onClick={() => onSelectSegment(seg.id)}
-                    className={`w-full px-3 py-3 text-left text-sm ${
-                      active ? "bg-muted-bg" : "hover:bg-muted-bg/60"
-                    }`}
-                  >
-                    <div className="font-medium">
-                      Clip {i + 1} · {formatDuration(seg.duration_seconds)}
-                    </div>
-                    <div className="mt-0.5 text-xs text-muted">
-                      {new Date(seg.start_at).toLocaleString()}
-                    </div>
-                    <div className="text-xs text-muted">
-                      {seg.frame_count} frames → ~{Math.max(1, Math.round(seg.frame_count / fps))}s
-                      @ {fps}fps
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {segments.length === 0 ? (
+            <p className="p-4 text-sm text-muted">No clips yet.</p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {segments.map((seg, i) => {
+                const active = activeSegment?.id === seg.id;
+                return (
+                  <li key={seg.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectSegment(seg.id)}
+                      className={`w-full px-3 py-3 text-left text-sm ${
+                        active ? "bg-muted-bg" : "hover:bg-muted-bg/60"
+                      }`}
+                    >
+                      <div className="font-medium">
+                        Clip {i + 1} · {formatDuration(seg.duration_seconds)}
+                      </div>
+                      <div className="mt-0.5 text-xs text-muted">
+                        {new Date(seg.start_at).toLocaleString()}
+                      </div>
+                      <div className="text-xs text-muted">
+                        {seg.frame_count} frames → ~
+                        {Math.max(1, Math.round(seg.frame_count / fps))}s @ {fps}
+                        fps
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       </aside>
 
-      <div className="overflow-hidden rounded-lg border border-border bg-black">
-        <div className="flex aspect-video items-center justify-center bg-slate-950">
+      <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-black">
+        <div className="flex min-h-0 flex-1 items-center justify-center bg-slate-950">
           {status === "encoding" ? (
             <p className="text-sm text-slate-400">
               Encoding smooth MP4 with ffmpeg…
@@ -607,7 +690,7 @@ function VideoMode({
             <p className="text-sm text-slate-400">Select a clip</p>
           )}
         </div>
-        <div className="border-t border-slate-800 bg-slate-900 p-3 text-xs text-slate-300">
+        <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-3 text-xs text-slate-300">
           {activeSegment
             ? `${activeSegment.frame_count} real frames · encoded @ ${fps} fps · ${new Date(
                 activeSegment.start_at,
