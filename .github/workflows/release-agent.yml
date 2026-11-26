@@ -25,15 +25,17 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: cu-agent-daemon-windows-x64.exe
             bin: cu-agent-daemon.exe
-          - name: macos-intel
-            os: macos-13
-            target: x86_64-apple-darwin
-            artifact: cu-agent-daemon-macos-x64
-            bin: cu-agent-daemon
+          # macos-latest is Apple Silicon; cross-compile Intel from the same runner
+          # (avoids scarce macos-13 queues and unsupported macos-14-arm64 labels).
           - name: macos-arm
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
             artifact: cu-agent-daemon-macos-arm64
+            bin: cu-agent-daemon
+          - name: macos-intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: cu-agent-daemon-macos-x64
             bin: cu-agent-daemon
     runs-on: ${{ matrix.os }}
     steps:
@@ -64,12 +66,15 @@ jobs:
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: nsis
           - name: macos-arm
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
+            bundles: dmg
           - name: macos-intel
-            os: macos-13
+            os: macos-latest
             target: x86_64-apple-darwin
+            bundles: dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -78,23 +83,27 @@ jobs:
           version: 9.15.0
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install deps
         run: pnpm install --frozen-lockfile
-      - name: Install Linux WebKit deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Build agent frontend
+        working-directory: apps/agent
+        run: pnpm build
       - name: Build Tauri setup (unsigned)
         working-directory: apps/agent
         env:
-          TAURI_BUNDLE_ACTIVE: "true"
-        run: pnpm tauri build --target ${{ matrix.target }}
+          CI: true
+        # Frontend already built; skip beforeBuildCommand. Prefer nsis/dmg only
+        # so Windows does not require WiX for MSI.
+        run: >
+          pnpm tauri build
+          --target ${{ matrix.target }}
+          --bundles ${{ matrix.bundles }}
+          --config "{\"build\":{\"beforeBuildCommand\":\"\"}}"
       - name: Upload bundles
         uses: actions/upload-artifact@v4
         with:
@@ -104,20 +113,41 @@ jobs:
             apps/agent/target/${{ matrix.target }}/release/bundle
           if-no-files-found: warn
 
+  pack-artifacts:
+    name: Pack downloadable artifacts
+    needs: [build-daemon, build-setup]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: artifacts
+      - name: Flatten
+        run: |
+          mkdir -p release
+          find artifacts -type f \( \
+            -name 'cu-agent-daemon*' -o \
+            -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o \
+            -name '*.app.tar.gz' -o -name '*.nsis.zip' \
+          \) -exec cp {} release/ \;
+          ls -laR artifacts release || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cu-agent-release-files
+          path: release/*
+          if-no-files-found: warn
+
   release:
     name: GitHub Release
-    needs: [build-daemon, build-setup]
+    needs: [pack-artifacts]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
-      - name: Pack
-        run: |
-          mkdir -p release
-          find artifacts -type f \( -name 'cu-agent-daemon*' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.app.tar.gz' \) -exec cp {} release/ \;
-          ls -laR artifacts release || true
+          name: cu-agent-release-files
+          path: release
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*

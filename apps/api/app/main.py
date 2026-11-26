@@ -41,25 +41,48 @@ async def _retention_loop(stop: asyncio.Event) -> None:
             continue
 
 
-async def _ensure_sqlite_columns() -> None:
-    if not get_settings().database_url.startswith("sqlite"):
-        return
+async def _ensure_schema_columns() -> None:
+    """Add columns introduced after initial create_all (SQLite + Postgres)."""
+    url = get_settings().database_url
     async with engine.begin() as conn:
-        cols = await conn.execute(text("PRAGMA table_info(users)"))
-        names = {row[1] for row in cols.fetchall()}
-        if "mfa_secret" not in names:
-            await conn.execute(text("ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64)"))
-        shot_cols = await conn.execute(text("PRAGMA table_info(screenshot_records)"))
-        shot_names = {row[1] for row in shot_cols.fetchall()}
-        alters = {
-            "mouse_x": "ALTER TABLE screenshot_records ADD COLUMN mouse_x FLOAT",
-            "mouse_y": "ALTER TABLE screenshot_records ADD COLUMN mouse_y FLOAT",
-            "mouse_buttons": "ALTER TABLE screenshot_records ADD COLUMN mouse_buttons INTEGER",
-            "mouse_action": "ALTER TABLE screenshot_records ADD COLUMN mouse_action VARCHAR(32)",
-        }
-        for col, sql in alters.items():
-            if col not in shot_names:
-                await conn.execute(text(sql))
+        if url.startswith("sqlite"):
+            cols = await conn.execute(text("PRAGMA table_info(users)"))
+            names = {row[1] for row in cols.fetchall()}
+            if "mfa_secret" not in names:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64)"))
+            shot_cols = await conn.execute(text("PRAGMA table_info(screenshot_records)"))
+            shot_names = {row[1] for row in shot_cols.fetchall()}
+            alters = {
+                "mouse_x": "ALTER TABLE screenshot_records ADD COLUMN mouse_x FLOAT",
+                "mouse_y": "ALTER TABLE screenshot_records ADD COLUMN mouse_y FLOAT",
+                "mouse_buttons": "ALTER TABLE screenshot_records ADD COLUMN mouse_buttons INTEGER",
+                "mouse_action": "ALTER TABLE screenshot_records ADD COLUMN mouse_action VARCHAR(32)",
+            }
+            for col, sql in alters.items():
+                if col not in shot_names:
+                    await conn.execute(text(sql))
+            return
+
+        # Postgres
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret VARCHAR(64)")
+        )
+        await conn.execute(
+            text("ALTER TABLE screenshot_records ADD COLUMN IF NOT EXISTS mouse_x DOUBLE PRECISION")
+        )
+        await conn.execute(
+            text("ALTER TABLE screenshot_records ADD COLUMN IF NOT EXISTS mouse_y DOUBLE PRECISION")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE screenshot_records ADD COLUMN IF NOT EXISTS mouse_buttons INTEGER"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE screenshot_records ADD COLUMN IF NOT EXISTS mouse_action VARCHAR(32)"
+            )
+        )
 
 
 @asynccontextmanager
@@ -70,7 +93,7 @@ async def lifespan(_app: FastAPI):
         Path("data").mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    await _ensure_sqlite_columns()
+    await _ensure_schema_columns()
     if settings.seed_on_startup:
         async with AsyncSessionLocal() as session:
             info = await seed_defaults(session)
