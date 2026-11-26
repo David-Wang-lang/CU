@@ -22,7 +22,7 @@ def _ffmpeg_bin() -> str:
         import imageio_ffmpeg
 
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         which = shutil.which("ffmpeg")
         if which:
             return which

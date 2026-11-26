@@ -175,7 +175,8 @@ pub struct BatchFrame {
 }
 
 /// Upload up to one minute of frames in a single request.
-/// Returns the file names the server stored. A 404 falls back to one-by-one upload.
+/// Returns the file names the server stored. If batch is missing or the large
+/// multipart fails (common before the VPS is updated), fall back to one-by-one.
 pub fn upload_screenshot_batch(
     config: &AgentConfig,
     frames: &[BatchFrame],
@@ -183,6 +184,21 @@ pub fn upload_screenshot_batch(
     if frames.is_empty() {
         return Ok(Vec::new());
     }
+    match try_upload_screenshot_batch(config, frames) {
+        Ok(accepted) => Ok(accepted),
+        Err(batch_err) => match upload_frames_individually(config, frames) {
+            Ok(accepted) => Ok(accepted),
+            Err(single_err) => Err(CoreError::Config(format!(
+                "batch failed ({batch_err}); single upload also failed: {single_err}"
+            ))),
+        },
+    }
+}
+
+fn try_upload_screenshot_batch(
+    config: &AgentConfig,
+    frames: &[BatchFrame],
+) -> Result<Vec<String>, CoreError> {
     let (client_id, secret) = creds(config)?;
     let items: Vec<BatchItem> = frames
         .iter()
@@ -215,15 +231,18 @@ pub fn upload_screenshot_batch(
         .multipart(form)
         .send()
         .map_err(|e| CoreError::Config(format!("batch upload failed: {e}")))?;
-    if res.status() == StatusCode::NOT_FOUND {
-        let mut accepted = Vec::new();
-        for frame in frames {
-            upload_jpeg(config, frame)?;
-            accepted.push(frame.file_name.clone());
-        }
-        return Ok(accepted);
+    let status = res.status();
+    if status == StatusCode::NOT_FOUND
+        || status == StatusCode::METHOD_NOT_ALLOWED
+        || status == StatusCode::PAYLOAD_TOO_LARGE
+        || status.is_server_error()
+    {
+        let text = res.text().unwrap_or_default();
+        return Err(CoreError::Config(format!(
+            "batch endpoint unavailable ({status}): {text}"
+        )));
     }
-    if !res.status().is_success() {
+    if !status.is_success() {
         let text = res.text().unwrap_or_default();
         return Err(CoreError::Config(format!("batch upload rejected: {text}")));
     }
@@ -231,6 +250,26 @@ pub fn upload_screenshot_batch(
         .json()
         .map_err(|e| CoreError::Config(format!("batch upload parse failed: {e}")))?;
     Ok(body.accepted_files)
+}
+
+fn upload_frames_individually(
+    config: &AgentConfig,
+    frames: &[BatchFrame],
+) -> Result<Vec<String>, CoreError> {
+    let mut accepted = Vec::new();
+    let mut last_err: Option<CoreError> = None;
+    for frame in frames {
+        match upload_jpeg(config, frame) {
+            Ok(()) => accepted.push(frame.file_name.clone()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    if accepted.is_empty() {
+        return Err(last_err.unwrap_or_else(|| {
+            CoreError::Config("single upload produced no accepted frames".into())
+        }));
+    }
+    Ok(accepted)
 }
 
 fn upload_jpeg(config: &AgentConfig, frame: &BatchFrame) -> Result<(), CoreError> {

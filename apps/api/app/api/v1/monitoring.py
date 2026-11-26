@@ -331,17 +331,22 @@ async def list_video_segments(
         current_end = first + bucket
         batch: list[ScreenshotRecord] = []
 
-        def flush(start: datetime, end: datetime, batch_rows: list[ScreenshotRecord]) -> None:
+        def flush(
+            start: datetime,
+            end: datetime,
+            batch_rows: list[ScreenshotRecord],
+            device_id: str = did,
+        ) -> None:
             if not batch_rows:
                 return
             last = _aware(batch_rows[-1].captured_at) or end
             start_a = _aware(batch_rows[0].captured_at) or start
             dur = max(1, int((last - start_a).total_seconds()))
-            seg_id = f"{did}:{start_a.isoformat()}"
+            seg_id = f"{device_id}:{start_a.isoformat()}"
             segments.append(
                 VideoSegmentOut(
                     id=seg_id,
-                    device_id=did,
+                    device_id=device_id,
                     start_at=start_a,
                     end_at=last,
                     duration_seconds=dur,
@@ -349,7 +354,7 @@ async def list_video_segments(
                     screenshot_ids=[str(x.id) for x in batch_rows],
                     video_url=(
                         f"/api/v1/activity/video?"
-                        f"device_id={did}&from_ts={start_a.isoformat()}&to_ts={last.isoformat()}&fps=3"
+                        f"device_id={device_id}&from_ts={start_a.isoformat()}&to_ts={last.isoformat()}&fps=3"
                     ),
                 )
             )
@@ -408,7 +413,7 @@ async def render_activity_video(
     out = video_cache_root() / f"{cache_key(keys, fps)}.mp4"
     try:
         await asyncio.to_thread(render_timelapse_mp4, frame_paths=paths, fps=fps, out_path=out)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=_video_error_message(exc)) from exc
 
     from app.services.audit import write_audit
@@ -463,7 +468,7 @@ async def prepare_activity_video(
     out = video_cache_root() / f"{cache_key(keys, fps)}.mp4"
     try:
         await asyncio.to_thread(render_timelapse_mp4, frame_paths=paths, fps=fps, out_path=out)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=_video_error_message(exc)) from exc
     return VideoRenderOut(
         segment_id=f"{device_id}:{from_ts.isoformat()}",
