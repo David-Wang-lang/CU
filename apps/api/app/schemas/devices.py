@@ -51,6 +51,7 @@ class DeviceOut(BaseModel):
     agent_version: str
     status: str
     monitoring_authorization: str
+    is_hidden: bool = False
     registered_at: datetime
     last_seen_at: datetime | None
 
@@ -61,3 +62,4 @@ class DeviceAuthUpdate(BaseModel):
     )
     employee_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    is_hidden: bool | None = None

@@ -61,6 +61,12 @@ async def _ensure_schema_columns() -> None:
             for col, sql in alters.items():
                 if col not in shot_names:
                     await conn.execute(text(sql))
+            device_cols = await conn.execute(text("PRAGMA table_info(devices)"))
+            device_names = {row[1] for row in device_cols.fetchall()}
+            if "is_hidden" not in device_names:
+                await conn.execute(
+                    text("ALTER TABLE devices ADD COLUMN is_hidden BOOLEAN DEFAULT 0 NOT NULL")
+                )
             return
 
         # Postgres
@@ -81,6 +87,11 @@ async def _ensure_schema_columns() -> None:
         await conn.execute(
             text(
                 "ALTER TABLE screenshot_records ADD COLUMN IF NOT EXISTS mouse_action VARCHAR(32)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE devices ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN NOT NULL DEFAULT FALSE"
             )
         )
 

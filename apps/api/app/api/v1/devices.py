@@ -47,6 +47,7 @@ def _device_out(device: Device, *, online_threshold: int) -> DeviceOut:
         agent_version=device.agent_version,
         status=status_value,
         monitoring_authorization=device.monitoring_authorization,
+        is_hidden=bool(getattr(device, "is_hidden", False)),
         registered_at=device.registered_at,
         last_seen_at=device.last_seen_at,
     )
@@ -54,15 +55,15 @@ def _device_out(device: Device, *, online_threshold: int) -> DeviceOut:
 
 @router.get("/devices", response_model=list[DeviceOut])
 async def list_devices(
+    include_hidden: bool = False,
     admin: AdminContext = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[DeviceOut]:
     settings = get_settings()
-    result = await db.execute(
-        select(Device)
-        .where(Device.organization_id == admin.organization_id)
-        .order_by(Device.name)
-    )
+    stmt = select(Device).where(Device.organization_id == admin.organization_id)
+    if not include_hidden:
+        stmt = stmt.where(Device.is_hidden.is_(False))
+    result = await db.execute(stmt.order_by(Device.name))
     return [_device_out(d, online_threshold=settings.online_threshold_seconds) for d in result.scalars()]
 
 
@@ -83,11 +84,16 @@ async def update_device(
     device = result.scalar_one_or_none()
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
-    if body.monitoring_authorization is None and not (body.name and body.name.strip()):
-        raise HTTPException(status_code=400, detail="Nothing to update")
+    changed = False
     if body.name is not None and body.name.strip():
         device.name = body.name.strip()
+        changed = True
+    if body.is_hidden is not None:
+        device.is_hidden = body.is_hidden
+        changed = True
     if body.monitoring_authorization is None:
+        if not changed:
+            raise HTTPException(status_code=400, detail="Nothing to update")
         await db.commit()
         await db.refresh(device)
         return _device_out(device, online_threshold=settings.online_threshold_seconds)

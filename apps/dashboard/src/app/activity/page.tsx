@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 
@@ -59,8 +59,9 @@ function ActivityInner() {
   const deviceId = params.get("device") ?? "";
   const mode: ViewMode = params.get("mode") === "video" ? "video" : "screenshot";
   const displayEvery = Math.max(1, Number(params.get("every") ?? "1") || 1);
-  const segmentMinutes = Number(params.get("clip") ?? "30") || 30;
+  const segmentMinutes = Number(params.get("clip") ?? "5") || 5;
   const fps = Number(params.get("fps") ?? "3") || 3;
+  const openMinute = params.get("minute") ?? "";
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   );
@@ -87,7 +88,8 @@ function ActivityInner() {
           deviceId ? `&device_id=${deviceId}` : ""
         }`,
       ),
-    refetchInterval: mode === "screenshot" ? 5000 : false,
+    // Metadata only; images load lazily when a minute group is opened.
+    refetchInterval: mode === "screenshot" ? 15_000 : false,
   });
 
   const segments = useQuery({
@@ -113,10 +115,19 @@ function ActivityInner() {
     () => (shots.data ?? []).filter((s) => !s.is_mock),
     [shots.data],
   );
+  const minuteGroups = useMemo(
+    () => groupShotsByMinute(allFrames),
+    [allFrames],
+  );
+  const activeGroup = useMemo(
+    () => minuteGroups.find((g) => g.key === openMinute) ?? null,
+    [minuteGroups, openMinute],
+  );
   const displayed = useMemo(() => {
+    if (!activeGroup) return [];
     const stride = Math.max(1, displayEvery);
-    return allFrames.filter((_, i) => i % stride === 0);
-  }, [allFrames, displayEvery]);
+    return activeGroup.shots.filter((_, i) => i % stride === 0);
+  }, [activeGroup, displayEvery]);
 
   const segmentList = segments.data ?? [];
   const activeSegment =
@@ -140,16 +151,19 @@ function ActivityInner() {
   return (
     <AppShell title="Activity">
       <p className="mb-4 text-sm text-muted">
-        Agent captures about once per second. Screenshot mode can thin the grid
-        for viewing. Video mode builds a smooth MP4 time-lapse (ffmpeg) from
-        real captures — clips default to 30 minutes of wall-clock time.
+        Screenshots are grouped by minute so the page stays light. Open a minute
+        to load those frames. Video mode builds short MP4 clips (default 5
+        minutes).
       </p>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <select
           className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
           value={deviceId}
-          onChange={(e) => setParam("device", e.target.value)}
+          onChange={(e) => {
+            setParam("device", e.target.value);
+            setParam("minute", "");
+          }}
         >
           <option value="">All devices</option>
           {(devices.data ?? []).map((d) => (
@@ -174,7 +188,7 @@ function ActivityInner() {
 
         {mode === "screenshot" ? (
           <label className="flex items-center gap-2 text-sm text-muted">
-            Show every
+            Within minute, show every
             <select
               className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
               value={displayEvery}
@@ -199,9 +213,10 @@ function ActivityInner() {
                   setSelectedSegmentId(null);
                 }}
               >
+                <option value={5}>5 min</option>
+                <option value={10}>10 min</option>
                 <option value={15}>15 min</option>
                 <option value={30}>30 min</option>
-                <option value={60}>60 min</option>
               </select>
             </label>
             <label className="flex items-center gap-2 text-sm text-muted">
@@ -228,11 +243,11 @@ function ActivityInner() {
         <Stat label="Idle (s)" value={stats.data?.idle_seconds} />
         <Stat label="Keystroke count" value={stats.data?.keystroke_count} />
         <Stat
-          label={mode === "screenshot" ? "Shown / total" : "Clips"}
+          label={mode === "screenshot" ? "Minutes / frames" : "Clips"}
           value={mode === "screenshot" ? undefined : segmentList.length}
           text={
             mode === "screenshot"
-              ? `${displayed.length} / ${allFrames.length}`
+              ? `${minuteGroups.length} / ${allFrames.length}`
               : undefined
           }
         />
@@ -240,8 +255,12 @@ function ActivityInner() {
 
       {mode === "screenshot" ? (
         <ScreenshotMode
+          groups={minuteGroups}
+          openMinute={openMinute}
           frames={displayed}
-          onOpen={(id) => setLightboxId(id)}
+          onOpenMinute={(key) => setParam("minute", key)}
+          onCloseMinute={() => setParam("minute", "")}
+          onOpenShot={(id) => setLightboxId(id)}
         />
       ) : (
         <VideoMode
@@ -274,6 +293,37 @@ function ActivityInner() {
   );
 }
 
+type MinuteGroup = {
+  key: string;
+  label: string;
+  shots: Shot[];
+};
+
+function groupShotsByMinute(frames: Shot[]): MinuteGroup[] {
+  const map = new Map<string, Shot[]>();
+  for (const shot of frames) {
+    const at = new Date(shot.captured_at);
+    if (Number.isNaN(at.getTime())) continue;
+    at.setSeconds(0, 0);
+    const key = at.toISOString();
+    const list = map.get(key);
+    if (list) list.push(shot);
+    else map.set(key, [shot]);
+  }
+  return [...map.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([key, shots]) => ({
+      key,
+      label: new Date(key).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+      shots,
+    }));
+}
+
 function ModeTab({
   active,
   onClick,
@@ -299,13 +349,21 @@ function ModeTab({
 }
 
 function ScreenshotMode({
+  groups,
+  openMinute,
   frames,
-  onOpen,
+  onOpenMinute,
+  onCloseMinute,
+  onOpenShot,
 }: {
+  groups: MinuteGroup[];
+  openMinute: string;
   frames: Shot[];
-  onOpen: (id: string) => void;
+  onOpenMinute: (key: string) => void;
+  onCloseMinute: () => void;
+  onOpenShot: (id: string) => void;
 }) {
-  if (frames.length === 0) {
+  if (groups.length === 0) {
     return (
       <div className="rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted">
         No screenshot records yet. Start the daemon to begin capturing.
@@ -313,31 +371,88 @@ function ScreenshotMode({
     );
   }
 
+  if (openMinute && frames.length >= 0) {
+    const group = groups.find((g) => g.key === openMinute);
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold">
+              {group?.label ?? "Selected minute"}
+            </h2>
+            <p className="text-xs text-muted">
+              {frames.length} frame{frames.length === 1 ? "" : "s"} loaded for
+              this minute
+            </p>
+          </div>
+          <button
+            type="button"
+            className="rounded-md border border-border px-3 py-1.5 text-sm"
+            onClick={onCloseMinute}
+          >
+            Back to minutes
+          </button>
+        </div>
+        {frames.length === 0 ? (
+          <div className="rounded-lg border border-border bg-surface p-6 text-sm text-muted">
+            No frames in this minute with the current filter.
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {frames.map((shot) => (
+              <button
+                key={shot.id}
+                type="button"
+                onClick={() => onOpenShot(shot.id)}
+                className="group overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
+              >
+                <div className="relative aspect-video bg-muted-bg">
+                  <AuthImage
+                    shotId={shot.id}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                  <MouseOverlay shot={shot} compact />
+                </div>
+                <div className="px-2 py-1.5 text-[11px] text-muted">
+                  {new Date(shot.captured_at).toLocaleTimeString()}
+                  {shot.mouse_action && shot.mouse_action !== "move"
+                    ? ` · ${shot.mouse_action}`
+                    : ""}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-      {frames.map((shot) => (
-        <button
-          key={shot.id}
-          type="button"
-          onClick={() => onOpen(shot.id)}
-          className="group overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
-        >
-          <div className="relative aspect-video bg-muted-bg">
-            <AuthImage
-              shotId={shot.id}
-              alt=""
-              className="h-full w-full object-cover"
-            />
-            <MouseOverlay shot={shot} compact />
-          </div>
-          <div className="px-2 py-1.5 text-[11px] text-muted">
-            {new Date(shot.captured_at).toLocaleString()}
-            {shot.mouse_action && shot.mouse_action !== "move"
-              ? ` · ${shot.mouse_action}`
-              : ""}
-          </div>
-        </button>
-      ))}
+    <div className="overflow-hidden rounded-lg border border-border bg-surface">
+      <div className="border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted">
+        Minutes
+      </div>
+      <ul className="divide-y divide-border">
+        {groups.map((group) => (
+          <li key={group.key}>
+            <button
+              type="button"
+              onClick={() => onOpenMinute(group.key)}
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm hover:bg-muted-bg/60"
+            >
+              <div>
+                <div className="font-medium">{group.label}</div>
+                <div className="text-xs text-muted">
+                  {group.shots.length} screenshot
+                  {group.shots.length === 1 ? "" : "s"}
+                </div>
+              </div>
+              <span className="text-xs text-accent">Open</span>
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -574,7 +689,8 @@ function Lightbox({
             <AuthImage
               shotId={shot.id}
               alt="Screenshot"
-              className="max-h-[80vh] w-full object-contain"
+              className="max-h-[80vh] w-full"
+              contain
             />
             <MouseOverlay shot={shot} />
           </div>
@@ -642,15 +758,36 @@ function AuthImage({
   shotId,
   alt,
   className,
+  contain = false,
 }: {
   shotId: string;
   alt: string;
   className?: string;
+  contain?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const hostRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    const node = hostRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
     let revoked: string | null = null;
     let cancelled = false;
     async function load() {
@@ -674,22 +811,26 @@ function AuthImage({
       cancelled = true;
       if (revoked) URL.revokeObjectURL(revoked);
     };
-  }, [shotId]);
+  }, [shotId, visible]);
 
-  if (error) {
-    return (
-      <div
-        className={`flex items-center justify-center bg-slate-900 text-xs text-slate-400 ${className ?? ""}`}
-      >
-        Failed to load
-      </div>
-    );
-  }
-  if (!url) {
-    return <div className={`animate-pulse bg-muted-bg ${className ?? ""}`} />;
-  }
-  // eslint-disable-next-line @next/next/no-img-element
-  return <img src={url} alt={alt} className={className} />;
+  return (
+    <div ref={hostRef} className={className}>
+      {error ? (
+        <div className="flex h-full w-full items-center justify-center bg-slate-900 text-xs text-slate-400">
+          Failed to load
+        </div>
+      ) : !url ? (
+        <div className="h-full w-full animate-pulse bg-muted-bg" />
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={url}
+          alt={alt}
+          className={`h-full w-full ${contain ? "object-contain" : "object-cover"}`}
+        />
+      )}
+    </div>
+  );
 }
 
 function Stat({

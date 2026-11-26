@@ -60,15 +60,16 @@ async def overview(
     employees = (
         await db.execute(select(func.count()).select_from(Employee).where(Employee.organization_id == org))
     ).scalar_one()
+    visible = (Device.organization_id == org, Device.is_hidden.is_(False))
     device_count = (
-        await db.execute(select(func.count()).select_from(Device).where(Device.organization_id == org))
+        await db.execute(select(func.count()).select_from(Device).where(*visible))
     ).scalar_one()
     threshold = datetime.now(UTC) - timedelta(seconds=settings.online_threshold_seconds)
     online = (
         await db.execute(
             select(func.count())
             .select_from(Device)
-            .where(Device.organization_id == org, Device.last_seen_at >= threshold)
+            .where(*visible, Device.last_seen_at >= threshold)
         )
     ).scalar_one()
     authorized = (
@@ -76,7 +77,7 @@ async def overview(
             select(func.count())
             .select_from(Device)
             .where(
-                Device.organization_id == org,
+                *visible,
                 Device.monitoring_authorization == "authorized",
             )
         )
@@ -575,7 +576,12 @@ async def _refresh_offline_alerts(db: AsyncSession, organization_id: UUID) -> No
     settings = get_settings()
     threshold = datetime.now(UTC) - timedelta(seconds=settings.online_threshold_seconds)
     devices = (
-        await db.execute(select(Device).where(Device.organization_id == organization_id))
+        await db.execute(
+            select(Device).where(
+                Device.organization_id == organization_id,
+                Device.is_hidden.is_(False),
+            )
+        )
     ).scalars().all()
     open_rows = (
         await db.execute(

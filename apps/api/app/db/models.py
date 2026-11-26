@@ -110,6 +110,7 @@ class Device(Base):
     agent_version: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="unknown")
     monitoring_authorization: Mapped[str] = mapped_column(String(50), default="authorized")
+    is_hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
