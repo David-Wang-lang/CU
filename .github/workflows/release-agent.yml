@@ -95,15 +95,18 @@ jobs:
         run: pnpm build
       - name: Build Tauri setup (unsigned)
         working-directory: apps/agent
+        shell: bash
         env:
           CI: true
-        # Frontend already built; skip beforeBuildCommand. Prefer nsis/dmg only
-        # so Windows does not require WiX for MSI.
-        run: >
-          pnpm tauri build
-          --target ${{ matrix.target }}
-          --bundles ${{ matrix.bundles }}
-          --config "{\"build\":{\"beforeBuildCommand\":\"\"}}"
+        # Frontend already built; skip beforeBuildCommand via a merge config file
+        # (inline --config JSON breaks under Windows PowerShell escaping).
+        # Prefer nsis/dmg only so Windows does not require WiX for MSI.
+        run: |
+          printf '%s\n' '{"build":{"beforeBuildCommand":""}}' > tauri-ci-config.json
+          pnpm tauri build \
+            --target "${{ matrix.target }}" \
+            --bundles "${{ matrix.bundles }}" \
+            --config tauri-ci-config.json
       - name: Upload bundles
         uses: actions/upload-artifact@v4
         with:
