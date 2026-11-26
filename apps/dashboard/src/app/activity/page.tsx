@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 
 import { AppShell } from "@/components/layout/app-shell";
@@ -38,15 +39,39 @@ type VideoSegment = {
 type ViewMode = "screenshot" | "video";
 
 export default function ActivityPage() {
-  const [deviceId, setDeviceId] = useState("");
-  const [mode, setMode] = useState<ViewMode>("screenshot");
-  /** Display stride: show 1 image out of every N captures (not capture interval). */
-  const [displayEvery, setDisplayEvery] = useState(1);
-  const [segmentMinutes, setSegmentMinutes] = useState(30);
+  return (
+    <Suspense
+      fallback={
+        <AppShell title="Activity">
+          <p className="text-sm text-muted">Loading activity…</p>
+        </AppShell>
+      }
+    >
+      <ActivityInner />
+    </Suspense>
+  );
+}
+
+function ActivityInner() {
+  const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const deviceId = params.get("device") ?? "";
+  const mode: ViewMode = params.get("mode") === "video" ? "video" : "screenshot";
+  const displayEvery = Math.max(1, Number(params.get("every") ?? "1") || 1);
+  const segmentMinutes = Number(params.get("clip") ?? "30") || 30;
+  const fps = Number(params.get("fps") ?? "3") || 3;
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   );
-  const [fps, setFps] = useState(3);
+
+  function setParam(key: string, value: string) {
+    const next = new URLSearchParams(params.toString());
+    if (!value) next.delete(key);
+    else next.set(key, value);
+    const query = next.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }
   const [lightboxId, setLightboxId] = useState<string | null>(null);
 
   const devices = useQuery({
@@ -124,7 +149,7 @@ export default function ActivityPage() {
         <select
           className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
           value={deviceId}
-          onChange={(e) => setDeviceId(e.target.value)}
+          onChange={(e) => setParam("device", e.target.value)}
         >
           <option value="">All devices</option>
           {(devices.data ?? []).map((d) => (
@@ -137,12 +162,12 @@ export default function ActivityPage() {
         <div className="inline-flex rounded-md border border-border bg-surface p-0.5">
           <ModeTab
             active={mode === "screenshot"}
-            onClick={() => setMode("screenshot")}
+            onClick={() => setParam("mode", "screenshot")}
             label="Screenshot"
           />
           <ModeTab
             active={mode === "video"}
-            onClick={() => setMode("video")}
+            onClick={() => setParam("mode", "video")}
             label="Video"
           />
         </div>
@@ -153,7 +178,7 @@ export default function ActivityPage() {
             <select
               className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
               value={displayEvery}
-              onChange={(e) => setDisplayEvery(Number(e.target.value))}
+              onChange={(e) => setParam("every", e.target.value)}
             >
               {[1, 2, 5, 10, 15, 30, 60].map((n) => (
                 <option key={n} value={n}>
@@ -170,7 +195,7 @@ export default function ActivityPage() {
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
                 value={segmentMinutes}
                 onChange={(e) => {
-                  setSegmentMinutes(Number(e.target.value));
+                  setParam("clip", e.target.value);
                   setSelectedSegmentId(null);
                 }}
               >
@@ -184,7 +209,7 @@ export default function ActivityPage() {
               <select
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
                 value={fps}
-                onChange={(e) => setFps(Number(e.target.value))}
+                onChange={(e) => setParam("fps", e.target.value)}
               >
                 <option value={1}>1 (slowest)</option>
                 <option value={2}>2</option>
@@ -317,6 +342,25 @@ function ScreenshotMode({
   );
 }
 
+function friendlyVideoError(raw: string): string {
+  const trimmed = raw.trim();
+  try {
+    const parsed = JSON.parse(trimmed) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+      return parsed.detail.trim();
+    }
+  } catch {
+    /* response was not JSON */
+  }
+  if (/ffmpeg/i.test(trimmed)) {
+    return "Video could not be built because ffmpeg is not available on the server.";
+  }
+  if (trimmed.length > 220) {
+    return "Video could not be built for this clip. Wait for more screenshots, then try again.";
+  }
+  return trimmed || "Video could not be built for this clip.";
+}
+
 function VideoMode({
   segments,
   activeSegment,
@@ -364,7 +408,7 @@ function VideoMode({
         });
         if (!res.ok) {
           const text = await res.text();
-          throw new Error(text || res.statusText);
+          throw new Error(friendlyVideoError(text || res.statusText));
         }
         const blob = await res.blob();
         if (cancelled) return;
@@ -375,7 +419,7 @@ function VideoMode({
       } catch (e) {
         if (!cancelled) {
           setStatus("error");
-          setError(e instanceof Error ? e.message : "Encode failed");
+          setError(e instanceof Error ? e.message : "Video could not be built for this clip.");
         }
       }
     }

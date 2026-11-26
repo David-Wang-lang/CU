@@ -19,3 +19,12 @@ cu-platform-macos = { path = "../cu-platform-macos" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 cu-platform-windows = { path = "../cu-platform-windows" }
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Environment",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+] }

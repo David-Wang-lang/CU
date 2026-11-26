@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    default_retention_days: int = 15
+    default_retention_days: int = 5
     seed_on_startup: bool = True
     seed_admin_email: str = "admin@example.com"
     seed_admin_password: str = "admin123!"

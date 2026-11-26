@@ -83,6 +83,14 @@ async def update_device(
     device = result.scalar_one_or_none()
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
+    if body.monitoring_authorization is None and not (body.name and body.name.strip()):
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    if body.name is not None and body.name.strip():
+        device.name = body.name.strip()
+    if body.monitoring_authorization is None:
+        await db.commit()
+        await db.refresh(device)
+        return _device_out(device, online_threshold=settings.online_threshold_seconds)
     device.monitoring_authorization = body.monitoring_authorization
     if body.employee_id is not None:
         device.employee_id = UUID(body.employee_id) if body.employee_id else None
@@ -170,6 +178,25 @@ async def list_enrollment_tokens(
         )
         for r in rows
     ]
+
+
+@router.delete("/enrollment-tokens/{token_id}", status_code=204)
+async def delete_enrollment_token(
+    token_id: UUID,
+    admin: AdminContext = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    result = await db.execute(
+        select(EnrollmentToken).where(
+            EnrollmentToken.id == token_id,
+            EnrollmentToken.organization_id == admin.organization_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Enrollment token not found")
+    await db.delete(row)
+    await db.commit()
 
 
 @router.post("/devices/enroll", response_model=DeviceEnrollResponse)

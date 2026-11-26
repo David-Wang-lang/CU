@@ -35,9 +35,18 @@ fn get_setup_status() -> Result<SetupStatus, String> {
 }
 
 #[tauri::command]
-fn enroll_device(api_base_url: String, enrollment_token: String) -> Result<SetupStatus, String> {
-    let config = enroll_local(api_base_url, enrollment_token).map_err(|e| e.to_string())?;
-    to_status(&config)
+async fn enroll_device(
+    api_base_url: String,
+    enrollment_token: String,
+) -> Result<SetupStatus, String> {
+    // reqwest::blocking starts its own runtime. Calling it on Tauri's async
+    // worker panics, and the release profile aborts the process (window vanishes).
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = enroll_local(api_base_url, enrollment_token).map_err(|e| e.to_string())?;
+        to_status(&config)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

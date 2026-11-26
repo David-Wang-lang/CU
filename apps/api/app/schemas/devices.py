@@ -56,5 +56,8 @@ class DeviceOut(BaseModel):
 
 
 class DeviceAuthUpdate(BaseModel):
-    monitoring_authorization: str = Field(pattern="^(authorized|withdrawn|pending)$")
+    monitoring_authorization: str | None = Field(
+        default=None, pattern="^(authorized|withdrawn|pending)$"
+    )
     employee_id: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=80)

@@ -40,6 +40,22 @@ def cache_key(object_keys: list[str], fps: float) -> str:
     return h.hexdigest()[:24]
 
 
+def _frame_suffix(path: Path) -> str:
+    """JPEG files were stored with a .png name. Trust the file header."""
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(3)
+    except OSError:
+        return ".png"
+    if magic[:2] == b"\xff\xd8":
+        return ".jpg"
+    return ".png"
+
+
+def _mostly_jpeg(paths: list[Path]) -> bool:
+    return bool(paths) and _frame_suffix(paths[0]) == ".jpg"
+
+
 def render_timelapse_mp4(
     *,
     frame_paths: list[Path],
@@ -61,7 +77,7 @@ def render_timelapse_mp4(
     with tempfile.TemporaryDirectory(prefix="cu-video-") as tmp:
         tmp_dir = Path(tmp)
         for i, src in enumerate(frame_paths):
-            dest = tmp_dir / f"frame_{i:06d}.png"
+            dest = tmp_dir / f"frame_{i:06d}{_frame_suffix(src)}"
             # Hard-link when possible; copy otherwise
             try:
                 dest.hardlink_to(src)
@@ -78,7 +94,7 @@ def render_timelapse_mp4(
             "-framerate",
             str(fps),
             "-i",
-            str(tmp_dir / "frame_%06d.png"),
+            str(tmp_dir / "frame_%06d.jpg") if _mostly_jpeg(frame_paths) else str(tmp_dir / "frame_%06d.png"),
             "-vf",
             "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v",

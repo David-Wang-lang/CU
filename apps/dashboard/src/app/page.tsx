@@ -19,7 +19,8 @@ export default function OverviewPage() {
   const overview = useQuery({
     queryKey: ["overview"],
     queryFn: () => apiFetch<Overview>("/overview"),
-    refetchInterval: 15_000,
+    staleTime: 20_000,
+    refetchInterval: 30_000,
   });
 
   const cards = [

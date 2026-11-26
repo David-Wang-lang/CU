@@ -41,6 +41,17 @@ class ActivityStatsOut(BaseModel):
     to_ts: datetime | None = None
 
 
+class AlertOut(BaseModel):
+    id: str
+    device_id: str | None
+    device_name: str | None = None
+    severity: str
+    title: str
+    message: str
+    is_resolved: bool
+    created_at: datetime
+
+
 class OverviewOut(BaseModel):
     employees: int
     devices: int

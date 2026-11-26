@@ -21,7 +21,13 @@ def save_screenshot_bytes(
     data: bytes,
     content_type: str = "image/png",
 ) -> tuple[str, int]:
-    ext = "png" if "png" in content_type else "bin"
+    lowered = content_type.lower()
+    if "jpeg" in lowered or "jpg" in lowered:
+        ext = "jpg"
+    elif "png" in lowered:
+        ext = "png"
+    else:
+        ext = "bin"
     rel = f"{organization_id}/{device_id}/{record_id}.{ext}"
     path = storage_root() / rel
     path.parent.mkdir(parents=True, exist_ok=True)

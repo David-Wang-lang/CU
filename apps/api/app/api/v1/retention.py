@@ -62,7 +62,7 @@ async def update_retention(
     if row is None:
         row = RetentionPolicy(
             organization_id=admin.organization_id,
-            retention_days=body.retention_days if body.retention_days in RETENTION_OPTIONS else 15,
+            retention_days=body.retention_days if body.retention_days in RETENTION_OPTIONS else 5,
             custom_days=body.custom_days or (None if body.retention_days in RETENTION_OPTIONS else days),
             updated_by=admin.user.id,
         )

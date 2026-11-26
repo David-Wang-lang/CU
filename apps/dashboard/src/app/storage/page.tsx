@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { AppShell } from "@/components/layout/app-shell";
@@ -42,6 +43,7 @@ function fmtBytes(n: number) {
 
 export default function StoragePage() {
   const qc = useQueryClient();
+  const [confirmCleanup, setConfirmCleanup] = useState("");
   const analytics = useQuery({
     queryKey: ["storage-analytics"],
     queryFn: () => apiFetch<StorageAnalytics>("/storage/analytics"),
@@ -57,7 +59,7 @@ export default function StoragePage() {
       apiFetch("/retention", {
         method: "PUT",
         body: JSON.stringify({
-          retention_days: retention.data?.options.includes(days) ? days : 15,
+          retention_days: retention.data?.options.includes(days) ? days : 5,
           custom_days: retention.data?.options.includes(days) ? null : days,
         }),
       }),
@@ -92,7 +94,7 @@ export default function StoragePage() {
       <div className="mb-6 rounded-lg border border-border bg-surface p-4">
         <h2 className="mb-3 text-sm font-semibold">Retention policy</h2>
         <div className="flex flex-wrap gap-2">
-          {(retention.data?.options ?? [1, 3, 7, 15, 30, 60, 90]).map((d) => {
+          {(retention.data?.options ?? [3, 5, 7, 15, 30, 60, 90]).map((d) => {
             const active =
               (retention.data?.custom_days ?? retention.data?.retention_days) ===
               d;
@@ -115,17 +117,36 @@ export default function StoragePage() {
         <p className="mt-3 text-xs text-muted">
           Current effective retention:{" "}
           {a?.retention_days ?? retention.data?.retention_days ?? "—"} days.
-          Cleanup runs hourly in the API process (and via Celery when Redis is
-          available).
+          Screenshots older than that are deleted. 3 or 5 days is the usual
+          choice. Cleanup runs hourly in the API process (and via Celery when
+          Redis is available).
         </p>
-        <button
-          type="button"
-          className="mt-3 rounded-md border border-border px-3 py-1.5 text-sm"
-          onClick={() => cleanup.mutate()}
-          disabled={cleanup.isPending}
-        >
-          Run cleanup now
-        </button>
+        <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3">
+          <p className="text-sm font-medium text-red-800">
+            Run cleanup now deletes screenshots older than the selected
+            retention. This cannot be undone.
+          </p>
+          <label className="mt-3 block text-xs text-red-900">
+            Type DELETE to confirm
+            <input
+              value={confirmCleanup}
+              onChange={(e) => setConfirmCleanup(e.target.value)}
+              className="mt-1 w-full max-w-xs rounded-md border border-red-200 bg-white px-2 py-1.5 text-sm text-foreground"
+              autoComplete="off"
+            />
+          </label>
+          <button
+            type="button"
+            className="mt-3 rounded-md bg-red-700 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+            onClick={() => {
+              cleanup.mutate();
+              setConfirmCleanup("");
+            }}
+            disabled={cleanup.isPending || confirmCleanup !== "DELETE"}
+          >
+            {cleanup.isPending ? "Deleting…" : "Delete expired screenshots"}
+          </button>
+        </div>
         {a?.cleanup?.ran_at && (
           <p className="mt-2 text-xs text-muted">
             Last cleanup: {new Date(a.cleanup.ran_at).toLocaleString()} ·

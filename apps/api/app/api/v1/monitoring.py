@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -14,16 +15,29 @@ from app.db.session import get_db
 from app.schemas.monitoring import (
     ActivityEventIn,
     ActivityStatsOut,
+    AlertOut,
     OverviewOut,
     ScreenshotOut,
     ScreenshotUploadResponse,
     VideoRenderOut,
     VideoSegmentOut,
 )
+from app.services.cleanup import get_retention_days
 from app.services.storage import resolve_screenshot_path, save_screenshot_bytes
 from app.services.video import cache_key, render_timelapse_mp4, video_cache_root
 
 router = APIRouter(tags=["monitoring"])
+
+
+def _video_error_message(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "ffmpeg" in text or "not available" in text:
+        return "Video could not be built because ffmpeg is not available on the server."
+    if "need at least one frame" in text or "no frames" in text:
+        return "This clip has no screenshots to turn into video yet."
+    if "invalid" in text or "decoder" in text or "header" in text:
+        return "Video could not be built from these screenshots. Capture a few more seconds and try again."
+    return "Video could not be built for this clip. Try again in a moment."
 
 
 def _aware(dt: datetime | None) -> datetime | None:
@@ -44,18 +58,27 @@ async def overview(
     employees = (
         await db.execute(select(func.count()).select_from(Employee).where(Employee.organization_id == org))
     ).scalar_one()
-    devices = (
-        await db.execute(select(Device).where(Device.organization_id == org))
-    ).scalars().all()
+    device_count = (
+        await db.execute(select(func.count()).select_from(Device).where(Device.organization_id == org))
+    ).scalar_one()
     threshold = datetime.now(UTC) - timedelta(seconds=settings.online_threshold_seconds)
-    online = 0
-    authorized = 0
-    for d in devices:
-        last = _aware(d.last_seen_at)
-        if last and last >= threshold:
-            online += 1
-        if d.monitoring_authorization == "authorized":
-            authorized += 1
+    online = (
+        await db.execute(
+            select(func.count())
+            .select_from(Device)
+            .where(Device.organization_id == org, Device.last_seen_at >= threshold)
+        )
+    ).scalar_one()
+    authorized = (
+        await db.execute(
+            select(func.count())
+            .select_from(Device)
+            .where(
+                Device.organization_id == org,
+                Device.monitoring_authorization == "authorized",
+            )
+        )
+    ).scalar_one()
     alerts = (
         await db.execute(
             select(func.count())
@@ -70,9 +93,9 @@ async def overview(
     ).scalar_one()
     return OverviewOut(
         employees=employees,
-        devices=len(devices),
+        devices=device_count,
         online_devices=online,
-        offline_devices=max(0, len(devices) - online),
+        offline_devices=max(0, device_count - online),
         authorized_sessions=authorized,
         alerts=alerts,
         screenshots=screenshots,
@@ -112,7 +135,6 @@ async def upload_screenshot(
         if captured_at
         else datetime.now(UTC)
     )
-    settings = get_settings()
     object_key, size = save_screenshot_bytes(
         organization_id=device.organization_id,
         device_id=device.id,
@@ -120,7 +142,8 @@ async def upload_screenshot(
         data=data,
         content_type=content_type,
     )
-    expires = captured + timedelta(days=settings.default_retention_days)
+    retention_days = await get_retention_days(db, device.organization_id)
+    expires = captured + timedelta(days=retention_days)
     action = (mouse_action or None) and mouse_action[:32]
     row = ScreenshotRecord(
         id=record_id,
@@ -305,9 +328,9 @@ async def render_activity_video(
 
     out = video_cache_root() / f"{cache_key(keys, fps)}.mp4"
     try:
-        render_timelapse_mp4(frame_paths=paths, fps=fps, out_path=out)
+        await asyncio.to_thread(render_timelapse_mp4, frame_paths=paths, fps=fps, out_path=out)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Video encode failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail=_video_error_message(exc)) from exc
 
     from app.services.audit import write_audit
 
@@ -360,9 +383,9 @@ async def prepare_activity_video(
         raise HTTPException(status_code=404, detail="Screenshot files missing")
     out = video_cache_root() / f"{cache_key(keys, fps)}.mp4"
     try:
-        render_timelapse_mp4(frame_paths=paths, fps=fps, out_path=out)
+        await asyncio.to_thread(render_timelapse_mp4, frame_paths=paths, fps=fps, out_path=out)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Video encode failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail=_video_error_message(exc)) from exc
     return VideoRenderOut(
         segment_id=f"{device_id}:{from_ts.isoformat()}",
         frame_count=len(paths),
@@ -460,4 +483,109 @@ async def activity_stats(
         event_count=len(rows),
         from_ts=min(times) if times else None,
         to_ts=max(times) if times else None,
+    )
+
+
+async def _refresh_offline_alerts(db: AsyncSession, organization_id: UUID) -> None:
+    """Open one alert when an authorized device stops heartbeating, and close it when it returns."""
+    settings = get_settings()
+    threshold = datetime.now(UTC) - timedelta(seconds=settings.online_threshold_seconds)
+    devices = (
+        await db.execute(select(Device).where(Device.organization_id == organization_id))
+    ).scalars().all()
+    open_rows = (
+        await db.execute(
+            select(Alert).where(
+                Alert.organization_id == organization_id,
+                Alert.is_resolved.is_(False),
+                Alert.title == "Device offline",
+            )
+        )
+    ).scalars().all()
+    open_by_device = {row.device_id: row for row in open_rows}
+    now = datetime.now(UTC)
+    for device in devices:
+        last = _aware(device.last_seen_at)
+        offline = last is None or last < threshold
+        existing = open_by_device.get(device.id)
+        if offline and device.monitoring_authorization == "authorized" and last is not None and existing is None:
+            db.add(
+                Alert(
+                    organization_id=organization_id,
+                    device_id=device.id,
+                    severity="warning",
+                    title="Device offline",
+                    message=f"{device.name} has not checked in since {last.isoformat()}.",
+                )
+            )
+        elif not offline and existing is not None:
+            existing.is_resolved = True
+            existing.resolved_at = now
+    await db.commit()
+
+
+@router.get("/alerts", response_model=list[AlertOut])
+async def list_alerts(
+    admin: AdminContext = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[AlertOut]:
+    await _refresh_offline_alerts(db, admin.organization_id)
+    rows = (
+        await db.execute(
+            select(Alert, Device.name)
+            .outerjoin(Device, Device.id == Alert.device_id)
+            .where(Alert.organization_id == admin.organization_id)
+            .order_by(Alert.created_at.desc())
+            .limit(200)
+        )
+    ).all()
+    return [
+        AlertOut(
+            id=str(alert.id),
+            device_id=str(alert.device_id) if alert.device_id else None,
+            device_name=device_name,
+            severity=alert.severity,
+            title=alert.title,
+            message=alert.message,
+            is_resolved=alert.is_resolved,
+            created_at=alert.created_at,
+        )
+        for alert, device_name in rows
+    ]
+
+
+@router.post("/alerts/{alert_id}/resolve", response_model=AlertOut)
+async def resolve_alert(
+    alert_id: UUID,
+    admin: AdminContext = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AlertOut:
+    row = (
+        await db.execute(
+            select(Alert).where(
+                Alert.id == alert_id,
+                Alert.organization_id == admin.organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    row.is_resolved = True
+    row.resolved_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(row)
+    device_name = None
+    if row.device_id is not None:
+        device_name = (
+            await db.execute(select(Device.name).where(Device.id == row.device_id))
+        ).scalar_one_or_none()
+    return AlertOut(
+        id=str(row.id),
+        device_id=str(row.device_id) if row.device_id else None,
+        device_name=device_name,
+        severity=row.severity,
+        title=row.title,
+        message=row.message,
+        is_resolved=row.is_resolved,
+        created_at=row.created_at,
     )

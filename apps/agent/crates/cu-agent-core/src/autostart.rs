@@ -130,13 +130,46 @@ fn install_macos_launch_agent(daemon_bin: PathBuf) -> Result<PathBuf, CoreError>
 
 #[cfg(target_os = "windows")]
 fn install_windows_stub(daemon_bin: PathBuf) -> Result<PathBuf, CoreError> {
-    let marker = config_dir()?.join("windows-autostart.stub");
+    if !daemon_bin.exists() {
+        return Err(CoreError::Config(format!(
+            "cu-agent-daemon binary not found at {}. Copy cu-agent-daemon.exe next to the setup app.",
+            daemon_bin.display()
+        )));
+    }
+    // UAC prompt so setup can register the visible "CU Agent" service.
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$p = Start-Process -FilePath $env:CU_DAEMON_PATH -ArgumentList '--install-service' -Verb RunAs -Wait -PassThru -WindowStyle Hidden; if ($null -eq $p) { exit 1 }; exit $p.ExitCode",
+    ])
+    .env("CU_DAEMON_PATH", &daemon_bin);
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let detail = service_install_log();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(CoreError::Config(format!(
+            "Could not install the CU Agent service ({}). Approve the administrator prompt and try again. {detail} {stderr} {stdout}",
+            output.status
+        )));
+    }
+    let marker = config_dir()?.join("windows-service.txt");
     fs::write(
         &marker,
         format!(
-            "Schedule `{}` via MDM / Windows Service in production packaging.\n",
+            "service=CUAgent\ndisplay=CU Agent\nbinary={}\n",
             daemon_bin.display()
         ),
     )?;
     Ok(marker)
+}
+
+#[cfg(target_os = "windows")]
+fn service_install_log() -> String {
+    let Ok(dir) = config_dir() else {
+        return String::new();
+    };
+    fs::read_to_string(dir.join("service-install.log")).unwrap_or_default()
 }

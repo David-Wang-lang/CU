@@ -1,24 +1,50 @@
 //! Headless CU agent daemon — continuous monitoring with no UI window.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use chrono::Utc;
+#[cfg(windows)]
+mod win_service;
+
 use cu_agent_core::api::{post_activity, upload_screenshot, ActivityEventIn, HeartbeatRequest};
 use cu_agent_core::config::{config_dir, load_config};
 use cu_agent_core::{AgentConfig, CoreError};
 use serde_json::json;
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("cu-agent-daemon error: {err}");
-        std::process::exit(1);
+    let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.iter().any(|arg| arg == "--install-service") {
+        std::process::exit(win_service::install_service());
+    }
+    if args.iter().any(|arg| arg == "--capture") || !cfg!(windows) {
+        if let Err(err) = run() {
+            #[cfg(windows)]
+            win_service::log_line(&format!("cu-agent-daemon error: {err}"));
+            #[cfg(not(windows))]
+            eprintln!("cu-agent-daemon error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(windows)]
+    {
+        // Started by the Service Control Manager. A double-click does not open a window.
+        let _ = win_service::run_service();
     }
 }
 
 fn run() -> Result<(), CoreError> {
     let mut config = load_config()?;
+    #[cfg(windows)]
+    if config.mock_screenshots && !cu_agent_core::config::mock_screenshots_enabled() {
+        config.mock_screenshots = false;
+        let _ = cu_agent_core::save_config(&config);
+    }
     if !config.is_enrolled() {
         eprintln!(
             "cu-agent-daemon: not enrolled. Run CU Agent Setup first. Config: {:?}",
@@ -27,48 +53,113 @@ fn run() -> Result<(), CoreError> {
         std::process::exit(2);
     }
 
-    println!(
+    daemon_log(&format!(
         "cu-agent-daemon starting device_id={:?} api={} mock={} capture_interval=1s",
         config.device_id, config.api_base_url, config.mock_screenshots
-    );
+    ));
 
-    // Capture once per second; heartbeat / activity samples less often.
-    // If macOS denies Screen Recording, back off hard — each screencapture call
-    // can re-open the TCC alert dialog.
-    let capture_tick = Duration::from_secs(1);
-    let heartbeat_every = Duration::from_secs(30);
-    let permission_backoff = Duration::from_secs(15 * 60);
-    let mut since_heartbeat = heartbeat_every; // heartbeat on first tick
-    let mut authorized = true;
-    let mut capture_paused_until = None::<std::time::Instant>;
+    let authorized = Arc::new(AtomicBool::new(true));
+    {
+        let config = config.clone();
+        let authorized = authorized.clone();
+        thread::spawn(move || heartbeat_loop(config, authorized));
+    }
+    let (tx, rx) = mpsc::sync_channel::<cu_agent_core::MockScreenshotMeta>(60);
+    {
+        let config = config.clone();
+        thread::spawn(move || upload_loop(config, rx));
+    }
+
+    let interval = Duration::from_secs(1);
     loop {
-        let now = std::time::Instant::now();
-        let capture_blocked = capture_paused_until
-            .map(|until| now < until)
-            .unwrap_or(false);
-
-        let do_hb = since_heartbeat >= heartbeat_every;
-        match tick_once(&mut config, do_hb, &mut authorized, !capture_blocked) {
-            Ok(()) => {}
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("SCREEN_RECORDING_DENIED") {
-                    capture_paused_until = Some(now + permission_backoff);
-                    eprintln!(
-                        "cu-agent-daemon: Screen Recording denied — pausing capture for {}s to avoid permission spam.\n\
-                         Fix: System Settings → Privacy & Security → Screen Recording → enable cu-agent-daemon, then restart the daemon.",
-                        permission_backoff.as_secs()
-                    );
-                } else {
-                    eprintln!("cu-agent-daemon tick error: {err}");
+        let started = Instant::now();
+        if authorized.load(Ordering::Relaxed) {
+            match capture_frame(&config) {
+                Ok(meta) => {
+                    if let Err(mpsc::TrySendError::Full(meta) | mpsc::TrySendError::Disconnected(meta)) =
+                        tx.try_send(meta)
+                    {
+                        let _ = std::fs::remove_file(&meta.path);
+                        daemon_log("capture upload queue is full; dropped one frame");
+                    }
                 }
+                Err(err) => daemon_log(&format!("capture error: {err}")),
             }
         }
-        if do_hb {
-            since_heartbeat = Duration::ZERO;
+        let elapsed = started.elapsed();
+        if let Some(rest) = interval.checked_sub(elapsed) {
+            thread::sleep(rest);
         }
-        thread::sleep(capture_tick);
-        since_heartbeat += capture_tick;
+    }
+}
+
+fn daemon_log(msg: &str) {
+    #[cfg(windows)]
+    win_service::log_line(msg);
+    #[cfg(not(windows))]
+    eprintln!("{msg}");
+}
+
+fn heartbeat_loop(mut config: AgentConfig, authorized: Arc<AtomicBool>) {
+    loop {
+        match send_heartbeat(&mut config) {
+            Ok(is_authorized) => authorized.store(is_authorized, Ordering::Relaxed),
+            Err(err) => daemon_log(&format!("heartbeat error: {err}")),
+        }
+        thread::sleep(Duration::from_secs(30));
+    }
+}
+
+fn send_heartbeat(config: &mut AgentConfig) -> Result<bool, CoreError> {
+    let (cpu, mem, disk) = sample_resources();
+    let hb = cu_agent_core::api::heartbeat(
+        config,
+        &HeartbeatRequest {
+            agent_version: env!("CARGO_PKG_VERSION").into(),
+            cpu_percent: cpu,
+            memory_percent: mem,
+            disk_percent: disk,
+        },
+    )?;
+    let is_authorized = hb.monitoring_authorization == "authorized";
+    daemon_log(&format!("heartbeat ok auth={is_authorized}"));
+    if is_authorized {
+        let (active, idle, keys) = sample_activity();
+        post_activity(
+            config,
+            &[ActivityEventIn {
+                event_type: "activity_sample".into(),
+                payload: json!({
+                    "active_seconds": active,
+                    "idle_seconds": idle,
+                    "keystroke_count": keys,
+                }),
+            }],
+        )?;
+    }
+    Ok(is_authorized)
+}
+
+fn capture_frame(config: &AgentConfig) -> Result<cu_agent_core::MockScreenshotMeta, CoreError> {
+    let dir = mock_output_dir()?;
+    platform_capture(&dir, config.mock_screenshots)
+}
+
+fn upload_loop(config: AgentConfig, rx: mpsc::Receiver<cu_agent_core::MockScreenshotMeta>) {
+    while let Ok(meta) = rx.recv() {
+        let uploaded = upload_screenshot(
+            &config,
+            &meta.path,
+            meta.is_mock,
+            meta.mouse_x,
+            meta.mouse_y,
+            meta.mouse_buttons,
+            meta.mouse_action.as_deref(),
+        );
+        let _ = std::fs::remove_file(&meta.path);
+        if let Err(err) = uploaded {
+            daemon_log(&format!("upload error: {err}"));
+        }
     }
 }
 
@@ -98,79 +189,6 @@ fn sample_resources() -> (Option<f32>, Option<f32>, Option<f32>) {
     (Some(cpu), Some(mem), disk)
 }
 
-fn tick_once(
-    config: &mut AgentConfig,
-    do_heartbeat: bool,
-    authorized: &mut bool,
-    do_capture: bool,
-) -> Result<(), CoreError> {
-    if do_heartbeat {
-        let (cpu, mem, disk) = sample_resources();
-        let hb = cu_agent_core::api::heartbeat(
-            config,
-            &HeartbeatRequest {
-                agent_version: env!("CARGO_PKG_VERSION").into(),
-                cpu_percent: cpu,
-                memory_percent: mem,
-                disk_percent: disk,
-            },
-        )?;
-        *authorized = hb.monitoring_authorization == "authorized";
-        println!(
-            "{} heartbeat ok auth={}",
-            Utc::now().to_rfc3339(),
-            hb.monitoring_authorization
-        );
-        if !*authorized {
-            println!("monitoring withdrawn — skipping capture");
-            return Ok(());
-        }
-
-        let (active, idle, keys) = sample_activity();
-        post_activity(
-            config,
-            &[ActivityEventIn {
-                event_type: "activity_sample".into(),
-                payload: json!({
-                    "active_seconds": active,
-                    "idle_seconds": idle,
-                    "keystroke_count": keys,
-                }),
-            }],
-        )?;
-    }
-
-    if !*authorized || !do_capture {
-        return Ok(());
-    }
-
-    let dir = mock_output_dir()?;
-    let meta = platform_capture(&dir, config.mock_screenshots)?;
-    println!(
-        "{} capture path={} mock={} mouse=({},{}) action={}",
-        Utc::now().to_rfc3339(),
-        meta.path,
-        meta.is_mock,
-        meta.mouse_x
-            .map(|v| format!("{v:.3}"))
-            .unwrap_or_else(|| "-".into()),
-        meta.mouse_y
-            .map(|v| format!("{v:.3}"))
-            .unwrap_or_else(|| "-".into()),
-        meta.mouse_action.as_deref().unwrap_or("-"),
-    );
-    upload_screenshot(
-        config,
-        &meta.path,
-        meta.is_mock,
-        meta.mouse_x,
-        meta.mouse_y,
-        meta.mouse_buttons,
-        meta.mouse_action.as_deref(),
-    )?;
-    Ok(())
-}
-
 fn mock_output_dir() -> Result<PathBuf, CoreError> {
     let dir = config_dir()?.join("captures");
     std::fs::create_dir_all(&dir)?;
@@ -187,7 +205,9 @@ fn platform_capture(
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = use_mock;
+        if use_mock {
+            return cu_agent_core::mock::capture_mock_screenshot(dir);
+        }
         return cu_platform_windows::capture_screen(dir);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -202,7 +222,11 @@ fn sample_activity() -> (u64, u64, u64) {
     {
         return cu_platform_macos::sample_activity_stats();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        return cu_platform_windows::sample_activity_stats();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         (30, 0, 0)
     }

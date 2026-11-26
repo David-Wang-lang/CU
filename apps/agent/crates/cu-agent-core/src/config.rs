@@ -12,6 +12,17 @@ use crate::CoreError;
 pub const CONFIG_FILE_NAME: &str = "agent.toml";
 pub const APP_DIR_NAME: &str = "CU";
 
+/// Production default is real capture. Set `CU_MOCK_SCREENSHOTS=true` for placeholders.
+pub fn mock_screenshots_enabled() -> bool {
+    match std::env::var("CU_MOCK_SCREENSHOTS") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v == "0" || v.eq_ignore_ascii_case("false"))
+        }
+        Err(_) => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentConfig {
     pub api_base_url: String,
@@ -34,9 +45,7 @@ impl Default for AgentConfig {
             client_id: None,
             client_secret: None,
             enrollment_token: None,
-            mock_screenshots: std::env::var("CU_MOCK_SCREENSHOTS")
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(true),
+            mock_screenshots: mock_screenshots_enabled(),
             enrolled_at: None,
             daemon_install_stub: false,
         }
@@ -145,9 +154,7 @@ pub fn enroll_local(
     config.device_id = Some(enrolled.device_id);
     config.client_id = Some(enrolled.client_id);
     config.client_secret = Some(enrolled.client_secret);
-    config.mock_screenshots = std::env::var("CU_MOCK_SCREENSHOTS")
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(true);
+    config.mock_screenshots = mock_screenshots_enabled();
     config.enrolled_at = Some(Utc::now());
     save_config(&config)?;
     Ok(config)

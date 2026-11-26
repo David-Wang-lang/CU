@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-RETENTION_OPTIONS = [1, 3, 7, 15, 30, 60, 90]
+RETENTION_OPTIONS = [3, 5, 7, 15, 30, 60, 90]
 
 
 class RetentionOut(BaseModel):

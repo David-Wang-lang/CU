@@ -42,7 +42,7 @@ pub struct ActivityEventIn {
 
 fn client() -> Result<Client, CoreError> {
     Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(12))
         .build()
         .map_err(|e| CoreError::Config(format!("http client: {e}")))
 }
@@ -108,9 +108,20 @@ pub fn upload_screenshot(
     let (client_id, secret) = creds(config)?;
     let bytes = fs::read(path.as_ref())?;
     let url = format!("{}/screenshots", config.api_base_url.trim_end_matches('/'));
+    let ext = path
+        .as_ref()
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+    let (file_name, mime) = if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg")
+    {
+        ("capture.jpg", "image/jpeg")
+    } else {
+        ("capture.png", "image/png")
+    };
     let part = multipart::Part::bytes(bytes)
-        .file_name("capture.png")
-        .mime_str("image/png")
+        .file_name(file_name)
+        .mime_str(mime)
         .map_err(|e| CoreError::Config(e.to_string()))?;
     let mut form = multipart::Form::new()
         .text("is_mock", if is_mock { "true" } else { "false" })

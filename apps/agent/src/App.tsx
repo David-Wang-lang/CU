@@ -86,9 +86,9 @@ export default function App() {
           <form onSubmit={onEnroll}>
             <h2 className="title">Enroll this device</h2>
             <p className="muted">
-              For administrators deploying on company-owned devices. After setup
-              the agent runs in the background with no employee-facing window or
-              notifications.
+              For administrators deploying on company-owned devices. After setup,
+              CU Agent runs as a Windows service with no window. It is listed in
+              Services and starts again when the PC boots.
             </p>
             <label className="field">
               <span>API base URL</span>
@@ -117,9 +117,10 @@ export default function App() {
           <>
             <h2 className="title">Install background agent</h2>
             <p className="muted">
-              Registers headless <code>cu-agent-daemon</code>. No tray icon, no
-              status UI, no monitoring notifications. Phase 1 marks a local
-              install stub; OS service registration ships in Phase 4.
+              Installs the <strong>CU Agent</strong> Windows service and starts
+              it. No console window, tray icon, or desktop icon. It is listed in
+              Services and starts again at boot. Windows will ask for
+              administrator approval.
             </p>
             {status?.device_id && (
               <p className="muted">Device ID: {status.device_id}</p>
@@ -134,13 +135,14 @@ export default function App() {
           <>
             <h2 className="title">Setup complete</h2>
             <p className="muted">
-              Config: <code>{status?.config_path}</code>. Close this window; the
-              daemon runs without a UI.
+              Config: <code>{status?.config_path}</code>. You can close this
+              window. CU Agent keeps running in the background and is listed in
+              Services under that name.
             </p>
             <div className="status">
-              <span>Daemon stub</span>
+              <span>CU Agent service</span>
               <span className="pill">
-                {status?.daemon_install_stub ? "registered" : "pending"}
+                {status?.daemon_install_stub ? "running" : "pending"}
               </span>
             </div>
             <button type="button" onClick={onFinish}>
