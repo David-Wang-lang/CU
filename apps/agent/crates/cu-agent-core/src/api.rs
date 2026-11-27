@@ -24,6 +24,12 @@ pub struct EnrollResponse {
 pub struct HeartbeatResponse {
     pub ok: bool,
     pub monitoring_authorization: String,
+    #[serde(default)]
+    pub capture_interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub capture_max_width: Option<u32>,
+    #[serde(default)]
+    pub capture_jpeg_quality: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]

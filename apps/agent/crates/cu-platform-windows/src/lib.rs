@@ -28,17 +28,21 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Capture the real desktop unless `CU_MOCK_SCREENSHOTS=true`.
-pub fn capture_screen(output_dir: impl AsRef<Path>) -> Result<MockScreenshotMeta, CoreError> {
+pub fn capture_screen(
+    output_dir: impl AsRef<Path>,
+    max_width: u32,
+    jpeg_quality: u8,
+) -> Result<MockScreenshotMeta, CoreError> {
     if cu_agent_core::config::mock_screenshots_enabled() {
         return capture_mock_screenshot(output_dir);
     }
     #[cfg(windows)]
     {
-        return capture_desktop(output_dir);
+        return capture_desktop(output_dir, max_width, jpeg_quality);
     }
     #[cfg(not(windows))]
     {
-        let _ = output_dir;
+        let _ = (output_dir, max_width, jpeg_quality);
         Err(CoreError::Config(
             "Windows screen capture is only available on Windows".into(),
         ))
@@ -86,9 +90,15 @@ fn sample_idle() -> (u64, u64, u64) {
 }
 
 #[cfg(windows)]
-fn capture_desktop(output_dir: impl AsRef<Path>) -> Result<MockScreenshotMeta, CoreError> {
+fn capture_desktop(
+    output_dir: impl AsRef<Path>,
+    max_width: u32,
+    jpeg_quality: u8,
+) -> Result<MockScreenshotMeta, CoreError> {
     let dir = output_dir.as_ref();
     std::fs::create_dir_all(dir)?;
+    let max_w = max_width.clamp(320, 2560) as i32;
+    let quality = jpeg_quality.clamp(20, 95);
 
     unsafe {
         let origin_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -98,8 +108,6 @@ fn capture_desktop(output_dir: impl AsRef<Path>) -> Result<MockScreenshotMeta, C
         if src_w <= 0 || src_h <= 0 {
             return Err(CoreError::Config("no desktop size reported".into()));
         }
-        // Smaller frames upload reliably at 1fps on constrained VPS proxies.
-        let max_w = 720i32;
         let (dst_w, dst_h) = if src_w > max_w {
             let dw = max_w;
             let dh = ((src_h as i64 * dw as i64) / src_w as i64).max(1) as i32;
@@ -233,7 +241,7 @@ fn capture_desktop(output_dir: impl AsRef<Path>) -> Result<MockScreenshotMeta, C
         let id = Uuid::new_v4();
         let path: PathBuf = dir.join(format!("screen-{id}.jpg"));
         let mut jpeg = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpeg, 45)
+        JpegEncoder::new_with_quality(&mut jpeg, quality)
             .write_image(img.as_raw(), dst_w as u32, dst_h as u32, ColorType::Rgb8.into())
             .map_err(|e| CoreError::Config(format!("screenshot encode failed: {e}")))?;
         std::fs::write(&path, jpeg)

@@ -176,8 +176,8 @@ function ActivityInner() {
       <div className="flex min-h-0 flex-1 flex-col gap-4">
         <p className="shrink-0 text-sm text-muted">
           Batches default to {groupMinutes} minutes with one cover image each.
-          Video clips default to 3 minutes (~180 frames at 1/s). Open a batch for
-          the frame grid; only the open batch loads images.
+          Capture interval is set on Storage (default 2s). Open a batch for the
+          frame grid; only the open batch loads images.
         </p>
 
         <div className="flex shrink-0 flex-wrap items-center gap-3">

@@ -2,7 +2,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -53,33 +53,95 @@ fn run() -> Result<(), CoreError> {
         std::process::exit(2);
     }
 
+    // Defaults match org Storage settings until the first heartbeat.
+    let capture = Arc::new(CaptureRuntime::default());
     daemon_log(&format!(
-        "CU Loader starting device_id={:?} api={} mock={} capture_interval=1s",
-        config.device_id, config.api_base_url, config.mock_screenshots
+        "CU Loader starting device_id={:?} api={} mock={} interval={}s width={} q={}",
+        config.device_id,
+        config.api_base_url,
+        config.mock_screenshots,
+        capture.interval_secs(),
+        capture.max_width(),
+        capture.jpeg_quality()
     ));
 
     let authorized = Arc::new(AtomicBool::new(true));
     {
         let config = config.clone();
         let authorized = authorized.clone();
-        thread::spawn(move || heartbeat_loop(config, authorized));
+        let capture = capture.clone();
+        thread::spawn(move || heartbeat_loop(config, authorized, capture));
     }
     {
         let config = config.clone();
         thread::spawn(move || batch_upload_loop(config));
     }
 
-    let interval = Duration::from_secs(1);
     loop {
         let started = Instant::now();
+        let interval = Duration::from_secs(capture.interval_secs());
         if authorized.load(Ordering::Relaxed) {
-            if let Err(err) = capture_frame(&config) {
+            if let Err(err) = capture_frame(&config, &capture) {
                 daemon_log(&format!("capture error: {err}"));
             }
         }
         let elapsed = started.elapsed();
         if let Some(rest) = interval.checked_sub(elapsed) {
             thread::sleep(rest);
+        }
+    }
+}
+
+struct CaptureRuntime {
+    interval_secs: AtomicU64,
+    max_width: AtomicU32,
+    jpeg_quality: AtomicU32,
+}
+
+impl Default for CaptureRuntime {
+    fn default() -> Self {
+        Self {
+            interval_secs: AtomicU64::new(2),
+            max_width: AtomicU32::new(720),
+            jpeg_quality: AtomicU32::new(45),
+        }
+    }
+}
+
+impl CaptureRuntime {
+    fn interval_secs(&self) -> u64 {
+        self.interval_secs.load(Ordering::Relaxed).clamp(1, 5)
+    }
+
+    fn max_width(&self) -> u32 {
+        self.max_width.load(Ordering::Relaxed).clamp(320, 2560)
+    }
+
+    fn jpeg_quality(&self) -> u8 {
+        self.jpeg_quality.load(Ordering::Relaxed).clamp(20, 95) as u8
+    }
+
+    fn apply_heartbeat(
+        &self,
+        interval: Option<u64>,
+        width: Option<u32>,
+        quality: Option<u8>,
+    ) {
+        if let Some(secs) = interval {
+            if (1..=5).contains(&secs) {
+                self.interval_secs.store(secs, Ordering::Relaxed);
+            }
+        }
+        if let Some(w) = width {
+            if [640, 720, 960, 1280].contains(&w) {
+                self.max_width.store(w, Ordering::Relaxed);
+            }
+        }
+        if let Some(q) = quality {
+            let q = u32::from(q);
+            if [35, 45, 55, 65].contains(&q) {
+                self.jpeg_quality.store(q, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -91,9 +153,13 @@ fn daemon_log(msg: &str) {
     eprintln!("{msg}");
 }
 
-fn heartbeat_loop(mut config: AgentConfig, authorized: Arc<AtomicBool>) {
+fn heartbeat_loop(
+    mut config: AgentConfig,
+    authorized: Arc<AtomicBool>,
+    capture: Arc<CaptureRuntime>,
+) {
     loop {
-        match send_heartbeat(&mut config) {
+        match send_heartbeat(&mut config, &capture) {
             Ok(is_authorized) => authorized.store(is_authorized, Ordering::Relaxed),
             Err(err) => daemon_log(&format!("heartbeat error: {err}")),
         }
@@ -101,7 +167,10 @@ fn heartbeat_loop(mut config: AgentConfig, authorized: Arc<AtomicBool>) {
     }
 }
 
-fn send_heartbeat(config: &mut AgentConfig) -> Result<bool, CoreError> {
+fn send_heartbeat(
+    config: &mut AgentConfig,
+    capture: &CaptureRuntime,
+) -> Result<bool, CoreError> {
     let (cpu, mem, disk) = sample_resources();
     let hb = cu_agent_core::api::heartbeat(
         config,
@@ -112,8 +181,18 @@ fn send_heartbeat(config: &mut AgentConfig) -> Result<bool, CoreError> {
             disk_percent: disk,
         },
     )?;
+    capture.apply_heartbeat(
+        hb.capture_interval_seconds,
+        hb.capture_max_width,
+        hb.capture_jpeg_quality,
+    );
     let is_authorized = hb.monitoring_authorization == "authorized";
-    daemon_log(&format!("heartbeat ok auth={is_authorized}"));
+    daemon_log(&format!(
+        "heartbeat ok auth={is_authorized} interval={}s width={} q={}",
+        capture.interval_secs(),
+        capture.max_width(),
+        capture.jpeg_quality()
+    ));
     if is_authorized {
         let (active, idle, keys) = sample_activity();
         post_activity(
@@ -131,11 +210,16 @@ fn send_heartbeat(config: &mut AgentConfig) -> Result<bool, CoreError> {
     Ok(is_authorized)
 }
 
-fn capture_frame(config: &AgentConfig) -> Result<(), CoreError> {
+fn capture_frame(config: &AgentConfig, capture: &CaptureRuntime) -> Result<(), CoreError> {
     let root = config_dir()?;
     let shots = root.join("captures");
     std::fs::create_dir_all(&shots)?;
-    let meta = platform_capture(&shots, config.mock_screenshots)?;
+    let meta = platform_capture(
+        &shots,
+        config.mock_screenshots,
+        capture.max_width(),
+        capture.jpeg_quality(),
+    )?;
     let queue = root.join("queue");
     cu_agent_core::spool::enqueue(&queue, &meta)?;
     let dropped = cu_agent_core::spool::prune(&queue, cu_agent_core::spool::MAX_QUEUED_FRAMES)?;
@@ -146,7 +230,6 @@ fn capture_frame(config: &AgentConfig) -> Result<(), CoreError> {
 }
 
 /// Small groups keep the queue near empty so frames are not dropped.
-// At 1s capture, 10 frames ≈ 10s — keep the queue near empty.
 const UPLOAD_GROUP_SIZE: usize = 10;
 const UPLOAD_MAX_WAIT: Duration = Duration::from_secs(10);
 
@@ -259,9 +342,12 @@ fn sample_resources() -> (Option<f32>, Option<f32>, Option<f32>) {
 fn platform_capture(
     dir: &PathBuf,
     use_mock: bool,
+    max_width: u32,
+    jpeg_quality: u8,
 ) -> Result<cu_agent_core::MockScreenshotMeta, CoreError> {
     #[cfg(target_os = "macos")]
     {
+        let _ = (max_width, jpeg_quality);
         return cu_platform_macos::capture_screen(dir, use_mock);
     }
     #[cfg(target_os = "windows")]
@@ -269,11 +355,11 @@ fn platform_capture(
         if use_mock {
             return cu_agent_core::mock::capture_mock_screenshot(dir);
         }
-        return cu_platform_windows::capture_screen(dir);
+        return cu_platform_windows::capture_screen(dir, max_width, jpeg_quality);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = use_mock;
+        let _ = (use_mock, max_width, jpeg_quality);
         cu_agent_core::mock::capture_mock_screenshot(dir)
     }
 }

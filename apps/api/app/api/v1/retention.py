@@ -9,12 +9,18 @@ from app.api.deps import AdminContext, get_current_admin
 from app.core.config import get_settings
 from app.db.models import Device, RetentionPolicy, ScreenshotRecord
 from app.db.session import get_db
+from app.schemas.capture_settings import CaptureSettingsOut, CaptureSettingsUpdate
 from app.schemas.retention import (
     RETENTION_OPTIONS,
     CleanupStatusOut,
     RetentionOut,
     RetentionUpdate,
     StorageAnalyticsOut,
+)
+from app.services.capture_settings import (
+    get_capture_settings,
+    set_capture_settings,
+    settings_out,
 )
 from app.services.cleanup import (
     get_cleanup_status,
@@ -24,6 +30,31 @@ from app.services.cleanup import (
 )
 
 router = APIRouter(tags=["retention"])
+
+
+@router.get("/capture-settings", response_model=CaptureSettingsOut)
+async def get_org_capture_settings(
+    admin: AdminContext = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CaptureSettingsOut:
+    data = await get_capture_settings(db, admin.organization_id)
+    return settings_out(data)
+
+
+@router.put("/capture-settings", response_model=CaptureSettingsOut)
+async def update_org_capture_settings(
+    body: CaptureSettingsUpdate,
+    admin: AdminContext = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> CaptureSettingsOut:
+    data = await set_capture_settings(
+        db,
+        admin.organization_id,
+        interval_seconds=body.interval_seconds,
+        max_width=body.max_width,
+        jpeg_quality=body.jpeg_quality,
+    )
+    return settings_out(data)
 
 
 @router.get("/retention", response_model=RetentionOut)

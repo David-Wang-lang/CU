@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { AppShell } from "@/components/layout/app-shell";
@@ -34,6 +34,15 @@ type Retention = {
   options: number[];
 };
 
+type CaptureSettings = {
+  interval_seconds: number;
+  max_width: number;
+  jpeg_quality: number;
+  interval_options: number[];
+  width_options: number[];
+  quality_options: number[];
+};
+
 function fmtBytes(n: number) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
@@ -53,6 +62,10 @@ export default function StoragePage() {
     queryKey: ["retention"],
     queryFn: () => apiFetch<Retention>("/retention"),
   });
+  const capture = useQuery({
+    queryKey: ["capture-settings"],
+    queryFn: () => apiFetch<CaptureSettings>("/capture-settings"),
+  });
 
   const updateRetention = useMutation({
     mutationFn: (days: number) =>
@@ -69,12 +82,22 @@ export default function StoragePage() {
     },
   });
 
+  const updateCapture = useMutation({
+    mutationFn: (body: Partial<CaptureSettings>) =>
+      apiFetch<CaptureSettings>("/capture-settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["capture-settings"] }),
+  });
+
   const cleanup = useMutation({
     mutationFn: () => apiFetch("/retention/cleanup", { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-analytics"] }),
   });
 
   const a = analytics.data;
+  const c = capture.data;
 
   return (
     <AppShell title="Storage">
@@ -89,6 +112,49 @@ export default function StoragePage() {
           label="Est. 30-day"
           value={a ? fmtBytes(a.estimated_30d_bytes) : "…"}
         />
+      </div>
+
+      <div className="mb-6 rounded-lg border border-border bg-surface p-4">
+        <h2 className="mb-3 text-sm font-semibold">Capture settings</h2>
+        <p className="mb-4 text-xs text-muted">
+          Applies to all enrolled agents within about 30 seconds via heartbeat.
+          Use 2s + 720px + quality 45 when uploads fall behind.
+        </p>
+
+        <SettingRow label="Capture interval">
+          {(c?.interval_options ?? [1, 2, 3, 5]).map((seconds) => (
+            <OptionButton
+              key={seconds}
+              active={(c?.interval_seconds ?? 2) === seconds}
+              label={`${seconds}s`}
+              onClick={() =>
+                updateCapture.mutate({ interval_seconds: seconds })
+              }
+            />
+          ))}
+        </SettingRow>
+
+        <SettingRow label="Max image width">
+          {(c?.width_options ?? [640, 720, 960, 1280]).map((width) => (
+            <OptionButton
+              key={width}
+              active={(c?.max_width ?? 720) === width}
+              label={`${width}px`}
+              onClick={() => updateCapture.mutate({ max_width: width })}
+            />
+          ))}
+        </SettingRow>
+
+        <SettingRow label="JPEG quality">
+          {(c?.quality_options ?? [35, 45, 55, 65]).map((quality) => (
+            <OptionButton
+              key={quality}
+              active={(c?.jpeg_quality ?? 45) === quality}
+              label={`${quality}`}
+              onClick={() => updateCapture.mutate({ jpeg_quality: quality })}
+            />
+          ))}
+        </SettingRow>
       </div>
 
       <div className="mb-6 rounded-lg border border-border bg-surface p-4">
@@ -196,5 +262,44 @@ function Card({ label, value }: { label: string; value: string | number }) {
       <p className="text-sm text-muted">{label}</p>
       <p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p>
     </div>
+  );
+}
+
+function SettingRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mb-4 last:mb-0">
+      <p className="mb-2 text-xs font-medium text-muted">{label}</p>
+      <div className="flex flex-wrap gap-2">{children}</div>
+    </div>
+  );
+}
+
+function OptionButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md px-3 py-1.5 text-sm ${
+        active
+          ? "bg-accent text-accent-fg"
+          : "border border-border text-muted"
+      }`}
+    >
+      {label}
+    </button>
   );
 }

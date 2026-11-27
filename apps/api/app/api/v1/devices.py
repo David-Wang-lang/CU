@@ -26,6 +26,7 @@ from app.schemas.devices import (
     EnrollmentTokenCreate,
     EnrollmentTokenOut,
 )
+from app.services.capture_settings import get_capture_settings
 
 router = APIRouter(tags=["devices"])
 
@@ -288,8 +289,12 @@ async def device_heartbeat(
             reported_at=datetime.now(UTC),
         )
     )
+    capture = await get_capture_settings(db, device.organization_id)
     await db.commit()
     return {
         "ok": True,
         "monitoring_authorization": device.monitoring_authorization,
+        "capture_interval_seconds": capture["interval_seconds"],
+        "capture_max_width": capture["max_width"],
+        "capture_jpeg_quality": capture["jpeg_quality"],
     }
