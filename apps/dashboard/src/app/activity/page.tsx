@@ -38,6 +38,17 @@ type VideoSegment = {
 
 type ViewMode = "screenshot" | "video";
 
+type BucketGroup = {
+  key: string;
+  label: string;
+  timeRange: string;
+  deviceLabel?: string;
+  coverId: string;
+  shots: Shot[];
+  startAt: string;
+  endAt: string;
+};
+
 export default function ActivityPage() {
   return (
     <Suspense
@@ -62,11 +73,10 @@ function ActivityInner() {
   const groupMinutes = Number(params.get("group") ?? params.get("clip") ?? "3") || 3;
   const segmentMinutes = Number(params.get("clip") ?? "3") || 3;
   const fps = Number(params.get("fps") ?? "3") || 3;
+  const dayParam = params.get("day") ?? "today";
   const openBucket = params.get("bucket") ?? params.get("minute") ?? "";
-  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
-    null,
-  );
-  const [lightboxId, setLightboxId] = useState<string | null>(null);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const [filmIndex, setFilmIndex] = useState(0);
 
   function setParams(updates: Record<string, string>) {
     const next = new URLSearchParams(params.toString());
@@ -74,11 +84,13 @@ function ActivityInner() {
       if (!value) next.delete(key);
       else next.set(key, value);
     }
-    // Drop legacy minute key once bucket is in use.
     if ("bucket" in updates) next.delete("minute");
     const query = next.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   }
+
+  const dayKey = resolveDayKey(dayParam);
+  const dayInputValue = dayKey;
 
   const devices = useQuery({
     queryKey: ["devices"],
@@ -124,43 +136,55 @@ function ActivityInner() {
 
   const allFrames = useMemo(() => {
     let list = (shots.data ?? []).filter((s) => !s.is_mock);
-    // Client-side guard so a racey URL never shows the wrong device.
-    if (deviceId) {
-      list = list.filter((s) => s.device_id === deviceId);
-    }
+    if (deviceId) list = list.filter((s) => s.device_id === deviceId);
     return list;
   }, [shots.data, deviceId]);
 
-  const bucketGroups = useMemo(
-    () => groupShotsByBucket(allFrames, groupMinutes, deviceNameById),
-    [allFrames, groupMinutes, deviceNameById],
+  const dayFrames = useMemo(
+    () => allFrames.filter((s) => localDayKey(new Date(s.captured_at)) === dayKey),
+    [allFrames, dayKey],
   );
+
+  const bucketGroups = useMemo(
+    () => groupShotsByBucket(dayFrames, groupMinutes, deviceNameById),
+    [dayFrames, groupMinutes, deviceNameById],
+  );
+
   const activeGroup = useMemo(
     () => bucketGroups.find((g) => g.key === openBucket) ?? null,
     [bucketGroups, openBucket],
   );
+
   const displayed = useMemo(() => {
     if (!activeGroup) return [];
     const stride = Math.max(1, displayEvery);
     return activeGroup.shots.filter((_, i) => i % stride === 0);
   }, [activeGroup, displayEvery]);
 
-  const segmentList = segments.data ?? [];
-  const activeSegment =
-    segmentList.find((s) => s.id === selectedSegmentId) ??
-    segmentList[0] ??
-    null;
+  const segmentList = useMemo(() => {
+    const list = segments.data ?? [];
+    return list.filter((seg) => localDayKey(new Date(seg.start_at)) === dayKey);
+  }, [segments.data, dayKey]);
 
-  const lightboxIndex = useMemo(
-    () => displayed.findIndex((s) => s.id === lightboxId),
-    [displayed, lightboxId],
+  const videoCards = useMemo(
+    () =>
+      segmentList.map((seg) => ({
+        id: seg.id,
+        coverId: seg.screenshot_ids[Math.floor(seg.screenshot_ids.length / 2)] ?? seg.screenshot_ids[0] ?? "",
+        timeRange: formatTimeRange(seg.start_at, seg.end_at),
+        deviceLabel: deviceNameById.get(seg.device_id),
+        frameCount: seg.frame_count,
+        segment: seg,
+      })),
+    [segmentList, deviceNameById],
   );
-  const lightboxShot =
-    lightboxIndex >= 0 ? displayed[lightboxIndex] : null;
+
+  const activeSegment =
+    segmentList.find((s) => s.id === selectedSegmentId) ?? segmentList[0] ?? null;
 
   useEffect(() => {
     setSelectedSegmentId(null);
-  }, [deviceId, segmentMinutes]);
+  }, [deviceId, segmentMinutes, dayKey]);
 
   useEffect(() => {
     if (mode === "video" && segmentList.length && !selectedSegmentId) {
@@ -168,19 +192,23 @@ function ActivityInner() {
     }
   }, [mode, segmentList, selectedSegmentId]);
 
+  useEffect(() => {
+    setFilmIndex(0);
+  }, [openBucket, displayEvery]);
+
+  useEffect(() => {
+    if (filmIndex >= displayed.length) setFilmIndex(0);
+  }, [displayed.length, filmIndex]);
+
+  const selectedShot = displayed[filmIndex] ?? null;
+
   return (
     <AppShell
       title="Activity"
       mainClassName="flex min-h-0 flex-1 flex-col overflow-hidden p-6"
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-4">
-        <p className="shrink-0 text-sm text-muted">
-          Batches default to {groupMinutes} minutes with one cover image each.
-          Capture interval is set on Storage (default 2s). Open a batch for the
-          frame grid; only the open batch loads images.
-        </p>
-
-        <div className="flex shrink-0 flex-wrap items-center gap-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <select
             className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             value={deviceId}
@@ -202,18 +230,46 @@ function ActivityInner() {
           <div className="inline-flex rounded-md border border-border bg-surface p-0.5">
             <ModeTab
               active={mode === "screenshot"}
-              onClick={() => setParams({ mode: "screenshot" })}
+              onClick={() => setParams({ mode: "screenshot", bucket: "" })}
               label="Screenshot"
             />
             <ModeTab
               active={mode === "video"}
-              onClick={() => setParams({ mode: "video" })}
+              onClick={() => setParams({ mode: "video", bucket: "" })}
               label="Video"
             />
           </div>
 
+          <div className="inline-flex rounded-md border border-border bg-surface p-0.5">
+            <ModeTab
+              active={dayParam === "today" || dayKey === todayKey()}
+              onClick={() => setParams({ day: "today", bucket: "" })}
+              label="Today"
+            />
+            <ModeTab
+              active={dayParam === "yesterday" || dayKey === yesterdayKey()}
+              onClick={() => setParams({ day: "yesterday", bucket: "" })}
+              label="Yesterday"
+            />
+          </div>
+
+          <input
+            type="date"
+            className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+            value={dayInputValue}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (!value) return;
+              const today = todayKey();
+              const yday = yesterdayKey();
+              const day =
+                value === today ? "today" : value === yday ? "yesterday" : value;
+              setParams({ day, bucket: "" });
+            }}
+          />
+
           <label className="flex items-center gap-2 text-sm text-muted">
-            Batch length
+            Batch
             <select
               className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
               value={mode === "video" ? segmentMinutes : groupMinutes}
@@ -236,7 +292,7 @@ function ActivityInner() {
 
           {mode === "screenshot" ? (
             <label className="flex items-center gap-2 text-sm text-muted">
-              In batch, show every
+              Every
               <select
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
                 value={displayEvery}
@@ -251,7 +307,7 @@ function ActivityInner() {
             </label>
           ) : (
             <label className="flex items-center gap-2 text-sm text-muted">
-              Playback FPS
+              FPS
               <select
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground"
                 value={fps}
@@ -267,20 +323,14 @@ function ActivityInner() {
           )}
         </div>
 
-        <div className="grid shrink-0 gap-3 sm:grid-cols-4">
-          <Stat label="Active (s)" value={stats.data?.active_seconds} />
-          <Stat label="Idle (s)" value={stats.data?.idle_seconds} />
-          <Stat label="Keystroke count" value={stats.data?.keystroke_count} />
-          <Stat
-            label={mode === "screenshot" ? "Batches / frames" : "Clips"}
-            value={mode === "screenshot" ? undefined : segmentList.length}
-            text={
-              mode === "screenshot"
-                ? `${bucketGroups.length} / ${allFrames.length}`
-                : undefined
-            }
-          />
-        </div>
+        <p className="shrink-0 text-xs text-muted">
+          Active {stats.data?.active_seconds ?? "—"}s · Idle{" "}
+          {stats.data?.idle_seconds ?? "—"}s · Keys{" "}
+          {stats.data?.keystroke_count ?? "—"} ·{" "}
+          {mode === "screenshot"
+            ? `${bucketGroups.length} batches · ${dayFrames.length} frames`
+            : `${segmentList.length} clips`}
+        </p>
 
         <div className="min-h-0 flex-1 overflow-hidden">
           {mode === "screenshot" ? (
@@ -288,52 +338,32 @@ function ActivityInner() {
               groups={bucketGroups}
               openBucket={openBucket}
               frames={displayed}
+              selectedShot={selectedShot}
+              filmIndex={filmIndex}
               loading={shots.isFetching && !shots.data}
-              error={shots.isError ? "Could not load screenshots for this device." : null}
+              error={
+                shots.isError
+                  ? "Could not load screenshots for this device."
+                  : null
+              }
               onOpenBucket={(key) => setParams({ bucket: key })}
               onCloseBucket={() => setParams({ bucket: "" })}
-              onOpenShot={(id) => setLightboxId(id)}
+              onSelectFrame={setFilmIndex}
             />
           ) : (
             <VideoMode
-              segments={segmentList}
+              cards={videoCards}
               activeSegment={activeSegment}
               onSelectSegment={(id) => setSelectedSegmentId(id)}
               fps={fps}
+              loading={segments.isFetching && !segments.data}
             />
           )}
         </div>
       </div>
-
-      {lightboxShot && lightboxIndex >= 0 ? (
-        <Lightbox
-          shot={lightboxShot}
-          index={lightboxIndex}
-          total={displayed.length}
-          onClose={() => setLightboxId(null)}
-          onPrev={() => {
-            if (lightboxIndex > 0) {
-              setLightboxId(displayed[lightboxIndex - 1].id);
-            }
-          }}
-          onNext={() => {
-            if (lightboxIndex < displayed.length - 1) {
-              setLightboxId(displayed[lightboxIndex + 1].id);
-            }
-          }}
-        />
-      ) : null}
     </AppShell>
   );
 }
-
-type BucketGroup = {
-  key: string;
-  label: string;
-  deviceLabel?: string;
-  coverId: string;
-  shots: Shot[];
-};
 
 function groupShotsByBucket(
   frames: Shot[],
@@ -361,14 +391,18 @@ function groupShotsByBucket(
       const ordered = [...shots].sort((a, b) =>
         a.captured_at < b.captured_at ? -1 : 1,
       );
-      const start = new Date(ordered[0].captured_at);
+      const startAt = ordered[0].captured_at;
+      const endAt = ordered[ordered.length - 1].captured_at;
       const cover = ordered[Math.floor(ordered.length / 2)] ?? ordered[0];
       const deviceLabel = deviceNames.get(ordered[0].device_id);
       return {
         key,
         deviceLabel,
         coverId: cover.id,
-        label: start.toLocaleString(undefined, {
+        startAt,
+        endAt,
+        timeRange: formatTimeRange(startAt, endAt),
+        label: new Date(startAt).toLocaleString(undefined, {
           month: "short",
           day: "numeric",
           hour: "numeric",
@@ -407,21 +441,42 @@ function ScreenshotMode({
   groups,
   openBucket,
   frames,
+  selectedShot,
+  filmIndex,
   loading,
   error,
   onOpenBucket,
   onCloseBucket,
-  onOpenShot,
+  onSelectFrame,
 }: {
   groups: BucketGroup[];
   openBucket: string;
   frames: Shot[];
+  selectedShot: Shot | null;
+  filmIndex: number;
   loading: boolean;
   error: string | null;
   onOpenBucket: (key: string) => void;
   onCloseBucket: () => void;
-  onOpenShot: (id: string) => void;
+  onSelectFrame: (index: number) => void;
 }) {
+  useEffect(() => {
+    if (!openBucket || frames.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCloseBucket();
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        onSelectFrame(Math.max(0, filmIndex - 1));
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        onSelectFrame(Math.min(frames.length - 1, filmIndex + 1));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openBucket, frames.length, filmIndex, onCloseBucket, onSelectFrame]);
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface text-sm text-muted">
@@ -439,7 +494,7 @@ function ScreenshotMode({
   if (groups.length === 0) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted">
-        No screenshot records for this device yet.
+        No screenshots for this day.
       </div>
     );
   }
@@ -448,14 +503,14 @@ function ScreenshotMode({
     const group = groups.find((g) => g.key === openBucket);
     return (
       <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
           <div>
             <h2 className="text-sm font-semibold">
-              {group?.label ?? "Selected batch"}
+              {group?.timeRange ?? "Batch"}
               {group?.deviceLabel ? ` · ${group.deviceLabel}` : ""}
             </h2>
             <p className="text-xs text-muted">
-              {frames.length} frame{frames.length === 1 ? "" : "s"} in this batch
+              {frames.length} frame{frames.length === 1 ? "" : "s"} · ← → to move
             </p>
           </div>
           <button
@@ -463,38 +518,78 @@ function ScreenshotMode({
             className="rounded-md border border-border px-3 py-1.5 text-sm"
             onClick={onCloseBucket}
           >
-            Back to batches
+            Back
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {frames.length === 0 ? (
-            <p className="text-sm text-muted">
-              No frames in this batch with the current filter.
-            </p>
+
+        <div className="relative flex min-h-0 flex-1 items-center justify-center bg-slate-950 p-3">
+          <button
+            type="button"
+            aria-label="Previous"
+            disabled={filmIndex <= 0}
+            onClick={() => onSelectFrame(Math.max(0, filmIndex - 1))}
+            className="absolute left-3 z-10 rounded-full bg-black/50 px-3 py-2 text-lg text-white disabled:opacity-30"
+          >
+            ‹
+          </button>
+          {selectedShot ? (
+            <div className="relative h-full max-h-full w-full max-w-5xl">
+              <AuthImage
+                shotId={selectedShot.id}
+                alt="Screenshot"
+                className="h-full w-full"
+                contain
+                eager
+              />
+              <MouseOverlay shot={selectedShot} />
+            </div>
           ) : (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-              {frames.map((shot) => (
+            <p className="text-sm text-slate-400">No frames in this batch.</p>
+          )}
+          <button
+            type="button"
+            aria-label="Next"
+            disabled={filmIndex >= frames.length - 1}
+            onClick={() =>
+              onSelectFrame(Math.min(frames.length - 1, filmIndex + 1))
+            }
+            className="absolute right-3 z-10 rounded-full bg-black/50 px-3 py-2 text-lg text-white disabled:opacity-30"
+          >
+            ›
+          </button>
+        </div>
+
+        <div className="shrink-0 border-t border-border bg-surface px-3 py-2">
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {frames.map((shot, index) => {
+              const active = index === filmIndex;
+              return (
                 <button
                   key={shot.id}
                   type="button"
-                  onClick={() => onOpenShot(shot.id)}
-                  className="overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
+                  onClick={() => onSelectFrame(index)}
+                  className={`relative h-16 w-28 shrink-0 overflow-hidden rounded border ${
+                    active
+                      ? "border-accent ring-1 ring-accent"
+                      : "border-border"
+                  }`}
                 >
-                  <div className="relative aspect-video bg-muted-bg">
-                    <AuthImage
-                      shotId={shot.id}
-                      alt=""
-                      className="h-full w-full"
-                    />
-                    <MouseOverlay shot={shot} compact />
-                  </div>
-                  <div className="px-2 py-1.5 text-[11px] text-muted">
-                    {new Date(shot.captured_at).toLocaleTimeString()}
-                  </div>
+                  <AuthImage
+                    shotId={shot.id}
+                    alt=""
+                    className="h-full w-full"
+                  />
+                  <span className="absolute bottom-0 left-0 right-0 bg-black/55 px-1 text-[10px] text-white">
+                    {new Date(shot.captured_at).toLocaleTimeString(undefined, {
+                      hour: "numeric",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })}
+                  </span>
                 </button>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
         </div>
       </div>
     );
@@ -502,11 +597,8 @@ function ScreenshotMode({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
-      <div className="shrink-0 border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted">
-        Batches
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           {groups.map((group) => (
             <button
               key={group.key}
@@ -514,22 +606,20 @@ function ScreenshotMode({
               onClick={() => onOpenBucket(group.key)}
               className="overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
             >
-              <div className="relative aspect-video bg-muted-bg">
+              <div className="relative aspect-[16/9] max-h-28 bg-muted-bg sm:max-h-32">
                 <AuthImage
                   shotId={group.coverId}
                   alt=""
                   className="h-full w-full"
                 />
-                <span className="absolute right-2 top-2 rounded bg-black/65 px-2 py-0.5 text-[11px] text-white">
+                <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white">
                   {group.shots.length}
                 </span>
               </div>
-              <div className="px-3 py-2">
-                <div className="text-sm font-medium">{group.label}</div>
-                <div className="text-xs text-muted">
-                  {group.deviceLabel ? `${group.deviceLabel} · ` : ""}
-                  {group.shots.length} screenshot
-                  {group.shots.length === 1 ? "" : "s"}
+              <div className="px-2.5 py-1.5">
+                <div className="text-sm font-medium">{group.timeRange}</div>
+                <div className="truncate text-xs text-muted">
+                  {group.deviceLabel ?? "Device"}
                 </div>
               </div>
             </button>
@@ -560,15 +650,24 @@ function friendlyVideoError(raw: string): string {
 }
 
 function VideoMode({
-  segments,
+  cards,
   activeSegment,
   onSelectSegment,
   fps,
+  loading,
 }: {
-  segments: VideoSegment[];
+  cards: {
+    id: string;
+    coverId: string;
+    timeRange: string;
+    deviceLabel?: string;
+    frameCount: number;
+    segment: VideoSegment;
+  }[];
   activeSegment: VideoSegment | null;
   onSelectSegment: (id: string) => void;
   fps: number;
+  loading: boolean;
 }) {
   const videoPath = useMemo(() => {
     if (!activeSegment) return null;
@@ -617,7 +716,11 @@ function VideoMode({
       } catch (e) {
         if (!cancelled) {
           setStatus("error");
-          setError(e instanceof Error ? e.message : "Video could not be built for this clip.");
+          setError(
+            e instanceof Error
+              ? e.message
+              : "Video could not be built for this clip.",
+          );
         }
       }
     }
@@ -628,54 +731,28 @@ function VideoMode({
     };
   }, [videoPath, activeSegment]);
 
-  return (
-    <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[280px_1fr]">
-      <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
-        <div className="shrink-0 border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted">
-          Clips
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {segments.length === 0 ? (
-            <p className="p-4 text-sm text-muted">No clips yet.</p>
-          ) : (
-            <ul className="divide-y divide-border">
-              {segments.map((seg, i) => {
-                const active = activeSegment?.id === seg.id;
-                return (
-                  <li key={seg.id}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectSegment(seg.id)}
-                      className={`w-full px-3 py-3 text-left text-sm ${
-                        active ? "bg-muted-bg" : "hover:bg-muted-bg/60"
-                      }`}
-                    >
-                      <div className="font-medium">
-                        Clip {i + 1} · {formatDuration(seg.duration_seconds)}
-                      </div>
-                      <div className="mt-0.5 text-xs text-muted">
-                        {new Date(seg.start_at).toLocaleString()}
-                      </div>
-                      <div className="text-xs text-muted">
-                        {seg.frame_count} frames → ~
-                        {Math.max(1, Math.round(seg.frame_count / fps))}s @ {fps}
-                        fps
-                      </div>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </aside>
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface text-sm text-muted">
+        Loading clips…
+      </div>
+    );
+  }
 
+  if (cards.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted">
+        No video clips for this day.
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid h-full min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(280px,360px)]">
       <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-black">
         <div className="flex min-h-0 flex-1 items-center justify-center bg-slate-950">
           {status === "encoding" ? (
-            <p className="text-sm text-slate-400">
-              Encoding smooth MP4 with ffmpeg…
-            </p>
+            <p className="text-sm text-slate-400">Encoding MP4…</p>
           ) : status === "error" ? (
             <p className="max-w-md px-4 text-center text-sm text-red-300">
               {error ?? "Failed to build video"}
@@ -693,104 +770,64 @@ function VideoMode({
             <p className="text-sm text-slate-400">Select a clip</p>
           )}
         </div>
-        <div className="shrink-0 border-t border-slate-800 bg-slate-900 p-3 text-xs text-slate-300">
+        <div className="shrink-0 border-t border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-300">
           {activeSegment
-            ? `${activeSegment.frame_count} real frames · encoded @ ${fps} fps · ${new Date(
+            ? `${activeSegment.frame_count} frames · ${fps} fps · ${formatTimeRange(
                 activeSegment.start_at,
-              ).toLocaleString()} → ${new Date(activeSegment.end_at).toLocaleString()}`
+                activeSegment.end_at,
+              )}`
             : "—"}
         </div>
       </div>
-    </div>
-  );
-}
 
-function Lightbox({
-  shot,
-  index,
-  total,
-  onClose,
-  onPrev,
-  onNext,
-}: {
-  shot: Shot;
-  index: number;
-  total: number;
-  onClose: () => void;
-  onPrev: () => void;
-  onNext: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-      if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        onPrev();
-      }
-      if (e.key === "ArrowRight") {
-        e.preventDefault();
-        onNext();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, onPrev, onNext]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      onClick={onClose}
-      role="presentation"
-    >
-      <div
-        className="relative max-h-[90vh] w-full max-w-5xl overflow-hidden rounded-lg bg-surface shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal
-      >
-        <div className="flex items-center justify-between border-b border-border px-4 py-2">
-          <p className="text-sm text-muted">
-            {index + 1} / {total} · {new Date(shot.captured_at).toLocaleString()}
-            <span className="ml-2 text-xs opacity-70">← → to navigate</span>
-          </p>
-          <button
-            type="button"
-            className="rounded px-2 py-1 text-sm text-muted hover:bg-muted-bg"
-            onClick={onClose}
-          >
-            Close
-          </button>
+      <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="shrink-0 border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted">
+          Clips
         </div>
-        <div className="relative bg-slate-950 p-2">
-          <button
-            type="button"
-            aria-label="Previous"
-            disabled={index <= 0}
-            onClick={onPrev}
-            className="absolute left-3 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 px-3 py-2 text-lg text-white disabled:opacity-30"
-          >
-            ‹
-          </button>
-          <div className="relative mx-auto inline-block max-h-[80vh] w-full">
-            <AuthImage
-              shotId={shot.id}
-              alt="Screenshot"
-              className="max-h-[80vh] w-full"
-              contain
-            />
-            <MouseOverlay shot={shot} />
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          <div className="grid grid-cols-1 gap-2">
+            {cards.map((card) => {
+              const active = activeSegment?.id === card.id;
+              return (
+                <button
+                  key={card.id}
+                  type="button"
+                  onClick={() => onSelectSegment(card.id)}
+                  className={`overflow-hidden rounded-lg border text-left transition ${
+                    active
+                      ? "border-accent ring-1 ring-accent"
+                      : "border-border hover:border-accent"
+                  }`}
+                >
+                  <div className="relative aspect-[16/9] max-h-24 bg-muted-bg">
+                    {card.coverId ? (
+                      <AuthImage
+                        shotId={card.coverId}
+                        alt=""
+                        className="h-full w-full"
+                      />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-xs text-muted">
+                        No cover
+                      </div>
+                    )}
+                    <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white">
+                      {card.frameCount}
+                    </span>
+                  </div>
+                  <div className="px-2.5 py-1.5">
+                    <div className="text-sm font-medium">{card.timeRange}</div>
+                    <div className="truncate text-xs text-muted">
+                      {card.deviceLabel ?? "Device"} · ~
+                      {Math.max(1, Math.round(card.frameCount / fps))}s
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
-          <button
-            type="button"
-            aria-label="Next"
-            disabled={index >= total - 1}
-            onClick={onNext}
-            className="absolute right-3 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 px-3 py-2 text-lg text-white disabled:opacity-30"
-          >
-            ›
-          </button>
         </div>
-      </div>
+      </aside>
     </div>
   );
 }
@@ -845,18 +882,24 @@ function AuthImage({
   alt,
   className,
   contain = false,
+  eager = false,
 }: {
   shotId: string;
   alt: string;
   className?: string;
   contain?: boolean;
+  eager?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
-  const [visible, setVisible] = useState(false);
+  const [visible, setVisible] = useState(eager);
   const hostRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    if (eager) {
+      setVisible(true);
+      return;
+    }
     const node = hostRef.current;
     if (!node) return;
     const observer = new IntersectionObserver(
@@ -870,10 +913,10 @@ function AuthImage({
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [eager]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !shotId) return;
     let revoked: string | null = null;
     let cancelled = false;
     async function load() {
@@ -903,7 +946,7 @@ function AuthImage({
     <div ref={hostRef} className={className}>
       {error ? (
         <div className="flex h-full w-full items-center justify-center bg-slate-900 text-xs text-slate-400">
-          Failed to load
+          Failed
         </div>
       ) : !url ? (
         <div className="h-full w-full animate-pulse bg-muted-bg" />
@@ -919,30 +962,38 @@ function AuthImage({
   );
 }
 
-function Stat({
-  label,
-  value,
-  text,
-}: {
-  label: string;
-  value?: number;
-  text?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-surface p-3">
-      <p className="text-xs text-muted">{label}</p>
-      <p className="mt-1 text-lg font-semibold">{text ?? value ?? "—"}</p>
-    </div>
-  );
+function formatTimeRange(startAt: string, endAt: string) {
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const opts: Intl.DateTimeFormatOptions = {
+    hour: "numeric",
+    minute: "2-digit",
+  };
+  return `${start.toLocaleTimeString(undefined, opts)}–${end.toLocaleTimeString(undefined, opts)}`;
 }
 
-function formatDuration(seconds: number) {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  if (m >= 60) {
-    const h = Math.floor(m / 60);
-    const rm = m % 60;
-    return `${h}h ${rm}m`;
-  }
-  return s ? `${m}m ${s}s` : `${m}m`;
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function localDayKey(date: Date) {
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function todayKey() {
+  return localDayKey(new Date());
+}
+
+function yesterdayKey() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return localDayKey(d);
+}
+
+function resolveDayKey(dayParam: string) {
+  if (dayParam === "today" || !dayParam) return todayKey();
+  if (dayParam === "yesterday") return yesterdayKey();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dayParam)) return dayParam;
+  return todayKey();
 }
