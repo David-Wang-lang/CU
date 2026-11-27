@@ -59,8 +59,8 @@ function ActivityInner() {
   const deviceId = params.get("device") ?? "";
   const mode: ViewMode = params.get("mode") === "video" ? "video" : "screenshot";
   const displayEvery = Math.max(1, Number(params.get("every") ?? "1") || 1);
-  const groupMinutes = Number(params.get("group") ?? params.get("clip") ?? "5") || 5;
-  const segmentMinutes = Number(params.get("clip") ?? "5") || 5;
+  const groupMinutes = Number(params.get("group") ?? params.get("clip") ?? "3") || 3;
+  const segmentMinutes = Number(params.get("clip") ?? "3") || 3;
   const fps = Number(params.get("fps") ?? "3") || 3;
   const openBucket = params.get("bucket") ?? params.get("minute") ?? "";
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
@@ -175,8 +175,9 @@ function ActivityInner() {
     >
       <div className="flex min-h-0 flex-1 flex-col gap-4">
         <p className="shrink-0 text-sm text-muted">
-          Batches are {groupMinutes} minutes with one cover image each. Open a
-          batch for the frame grid. Only the open batch loads images.
+          Batches default to {groupMinutes} minutes with one cover image each.
+          Video clips default to 3 minutes (~180 frames at 1/s). Open a batch for
+          the frame grid; only the open batch loads images.
         </p>
 
         <div className="flex shrink-0 flex-wrap items-center gap-3">
@@ -226,8 +227,10 @@ function ActivityInner() {
                 });
               }}
             >
+              <option value={3}>3 min</option>
               <option value={5}>5 min</option>
               <option value={10}>10 min</option>
+              <option value={15}>15 min</option>
             </select>
           </label>
 
@@ -337,7 +340,7 @@ function groupShotsByBucket(
   minutes: number,
   deviceNames: Map<string, string>,
 ): BucketGroup[] {
-  const bucketMs = Math.max(5, minutes) * 60 * 1000;
+  const bucketMs = Math.max(3, minutes) * 60 * 1000;
   const map = new Map<string, Shot[]>();
   for (const shot of frames) {
     const at = new Date(shot.captured_at);

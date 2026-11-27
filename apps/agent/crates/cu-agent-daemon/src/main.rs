@@ -54,7 +54,7 @@ fn run() -> Result<(), CoreError> {
     }
 
     daemon_log(&format!(
-        "CU Loader starting device_id={:?} api={} mock={} capture_interval=3s",
+        "CU Loader starting device_id={:?} api={} mock={} capture_interval=1s",
         config.device_id, config.api_base_url, config.mock_screenshots
     ));
 
@@ -69,7 +69,7 @@ fn run() -> Result<(), CoreError> {
         thread::spawn(move || batch_upload_loop(config));
     }
 
-    let interval = Duration::from_secs(3);
+    let interval = Duration::from_secs(1);
     loop {
         let started = Instant::now();
         if authorized.load(Ordering::Relaxed) {
@@ -146,9 +146,9 @@ fn capture_frame(config: &AgentConfig) -> Result<(), CoreError> {
 }
 
 /// Small groups keep the queue near empty so frames are not dropped.
-// At 3s capture, 5 frames ≈ 15s — keep the queue near empty.
-const UPLOAD_GROUP_SIZE: usize = 5;
-const UPLOAD_MAX_WAIT: Duration = Duration::from_secs(15);
+// At 1s capture, 10 frames ≈ 10s — keep the queue near empty.
+const UPLOAD_GROUP_SIZE: usize = 10;
+const UPLOAD_MAX_WAIT: Duration = Duration::from_secs(10);
 
 fn batch_upload_loop(config: AgentConfig) {
     if let Ok(root) = config_dir() {

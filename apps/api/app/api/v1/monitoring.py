@@ -306,7 +306,7 @@ async def list_video_segments(
     db: AsyncSession = Depends(get_db),
 ) -> list[VideoSegmentOut]:
     """Group real screenshots into wall-clock clips (default 30 minutes) for Video mode."""
-    minutes = min(max(segment_minutes, 5), 120)
+    minutes = min(max(segment_minutes, 3), 120)
     bucket = timedelta(minutes=minutes)
     stmt = (
         select(ScreenshotRecord)

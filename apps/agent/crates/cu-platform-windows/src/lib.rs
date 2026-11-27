@@ -98,8 +98,8 @@ fn capture_desktop(output_dir: impl AsRef<Path>) -> Result<MockScreenshotMeta, C
         if src_w <= 0 || src_h <= 0 {
             return Err(CoreError::Config("no desktop size reported".into()));
         }
-        // Smaller frames upload reliably on constrained VPS proxies.
-        let max_w = 960i32;
+        // Smaller frames upload reliably at 1fps on constrained VPS proxies.
+        let max_w = 720i32;
         let (dst_w, dst_h) = if src_w > max_w {
             let dw = max_w;
             let dh = ((src_h as i64 * dw as i64) / src_w as i64).max(1) as i32;
@@ -233,7 +233,7 @@ fn capture_desktop(output_dir: impl AsRef<Path>) -> Result<MockScreenshotMeta, C
         let id = Uuid::new_v4();
         let path: PathBuf = dir.join(format!("screen-{id}.jpg"));
         let mut jpeg = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpeg, 55)
+        JpegEncoder::new_with_quality(&mut jpeg, 45)
             .write_image(img.as_raw(), dst_w as u32, dst_h as u32, ColorType::Rgb8.into())
             .map_err(|e| CoreError::Config(format!("screenshot encode failed: {e}")))?;
         std::fs::write(&path, jpeg)
