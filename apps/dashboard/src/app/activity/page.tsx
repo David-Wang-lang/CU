@@ -91,6 +91,7 @@ function ActivityInner() {
 
   const dayKey = resolveDayKey(dayParam);
   const dayInputValue = dayKey;
+  const dayRange = useMemo(() => localDayBounds(dayKey), [dayKey]);
 
   const devices = useQuery({
     queryKey: ["devices"],
@@ -104,12 +105,13 @@ function ActivityInner() {
   }, [devices.data]);
 
   const shots = useQuery({
-    queryKey: ["screenshots", deviceId],
+    queryKey: ["screenshots", deviceId, dayKey],
     queryFn: () =>
       apiFetch<Shot[]>(
-        `/screenshots?limit=3000&include_mock=false${
-          deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""
-        }`,
+        `/screenshots?limit=10000&include_mock=false` +
+          `&from_ts=${encodeURIComponent(dayRange.fromIso)}` +
+          `&to_ts=${encodeURIComponent(dayRange.toIso)}` +
+          (deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""),
       ),
     refetchInterval: mode === "screenshot" ? 20_000 : false,
     staleTime: 10_000,
@@ -134,20 +136,21 @@ function ActivityInner() {
       ),
   });
 
-  const allFrames = useMemo(() => {
+  const dayFrames = useMemo(() => {
     let list = (shots.data ?? []).filter((s) => !s.is_mock);
     if (deviceId) list = list.filter((s) => s.device_id === deviceId);
-    return list;
-  }, [shots.data, deviceId]);
-
-  const dayFrames = useMemo(
-    () => allFrames.filter((s) => localDayKey(new Date(s.captured_at)) === dayKey),
-    [allFrames, dayKey],
-  );
+    // Keep a local-day guard in case API timezone parsing drifts.
+    return list.filter((s) => localDayKey(new Date(s.captured_at)) === dayKey);
+  }, [shots.data, deviceId, dayKey]);
 
   const bucketGroups = useMemo(
     () => groupShotsByBucket(dayFrames, groupMinutes, deviceNameById),
     [dayFrames, groupMinutes, deviceNameById],
+  );
+
+  const hourSections = useMemo(
+    () => groupBucketsByHour(bucketGroups),
+    [bucketGroups],
   );
 
   const activeGroup = useMemo(
@@ -336,6 +339,7 @@ function ActivityInner() {
           {mode === "screenshot" ? (
             <ScreenshotMode
               groups={bucketGroups}
+              hourSections={hourSections}
               openBucket={openBucket}
               frames={displayed}
               selectedShot={selectedShot}
@@ -364,6 +368,13 @@ function ActivityInner() {
     </AppShell>
   );
 }
+
+type HourSection = {
+  key: string;
+  label: string;
+  frameCount: number;
+  groups: BucketGroup[];
+};
 
 function groupShotsByBucket(
   frames: Shot[],
@@ -413,6 +424,82 @@ function groupShotsByBucket(
     });
 }
 
+function groupBucketsByHour(groups: BucketGroup[]): HourSection[] {
+  const map = new Map<string, BucketGroup[]>();
+  for (const group of groups) {
+    const at = new Date(group.startAt);
+    if (Number.isNaN(at.getTime())) continue;
+    const hour = new Date(
+      at.getFullYear(),
+      at.getMonth(),
+      at.getDate(),
+      at.getHours(),
+      0,
+      0,
+      0,
+    );
+    const key = hour.toISOString();
+    const list = map.get(key);
+    if (list) list.push(group);
+    else map.set(key, [group]);
+  }
+  return [...map.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([key, sectionGroups]) => {
+      const hourDate = new Date(key);
+      const frameCount = sectionGroups.reduce((n, g) => n + g.shots.length, 0);
+      return {
+        key,
+        label: hourDate.toLocaleTimeString(undefined, {
+          hour: "numeric",
+        }),
+        frameCount,
+        groups: sectionGroups,
+      };
+    });
+}
+
+function groupVideoCardsByHour(
+  cards: {
+    id: string;
+    coverId: string;
+    timeRange: string;
+    deviceLabel?: string;
+    frameCount: number;
+    segment: VideoSegment;
+  }[],
+): { key: string; label: string; frameCount: number; cards: typeof cards }[] {
+  const map = new Map<string, typeof cards>();
+  for (const card of cards) {
+    const at = new Date(card.segment.start_at);
+    if (Number.isNaN(at.getTime())) continue;
+    const hour = new Date(
+      at.getFullYear(),
+      at.getMonth(),
+      at.getDate(),
+      at.getHours(),
+      0,
+      0,
+      0,
+    );
+    const key = hour.toISOString();
+    const list = map.get(key);
+    if (list) list.push(card);
+    else map.set(key, [card]);
+  }
+  return [...map.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([key, sectionCards]) => {
+      const hourDate = new Date(key);
+      return {
+        key,
+        label: hourDate.toLocaleTimeString(undefined, { hour: "numeric" }),
+        frameCount: sectionCards.reduce((n, c) => n + c.frameCount, 0),
+        cards: sectionCards,
+      };
+    });
+}
+
 function ModeTab({
   active,
   onClick,
@@ -439,6 +526,7 @@ function ModeTab({
 
 function ScreenshotMode({
   groups,
+  hourSections,
   openBucket,
   frames,
   selectedShot,
@@ -450,6 +538,7 @@ function ScreenshotMode({
   onSelectFrame,
 }: {
   groups: BucketGroup[];
+  hourSections: HourSection[];
   openBucket: string;
   frames: Shot[];
   selectedShot: Shot | null;
@@ -598,31 +687,50 @@ function ScreenshotMode({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {groups.map((group) => (
-            <button
-              key={group.key}
-              type="button"
-              onClick={() => onOpenBucket(group.key)}
-              className="overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
-            >
-              <div className="relative aspect-[16/9] max-h-28 bg-muted-bg sm:max-h-32">
-                <AuthImage
-                  shotId={group.coverId}
-                  alt=""
-                  className="h-full w-full"
-                />
-                <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white">
-                  {group.shots.length}
-                </span>
+        <div className="flex flex-col gap-5">
+          {hourSections.map((section) => (
+            <section key={section.key}>
+              <div className="mb-2 flex items-baseline justify-between gap-2 border-b border-border pb-1.5">
+                <h2 className="text-sm font-semibold text-foreground">
+                  {section.label}
+                </h2>
+                <p className="text-xs text-muted">
+                  {section.groups.length} batch
+                  {section.groups.length === 1 ? "" : "es"} ·{" "}
+                  {section.frameCount} frame
+                  {section.frameCount === 1 ? "" : "s"}
+                </p>
               </div>
-              <div className="px-2.5 py-1.5">
-                <div className="text-sm font-medium">{group.timeRange}</div>
-                <div className="truncate text-xs text-muted">
-                  {group.deviceLabel ?? "Device"}
-                </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                {section.groups.map((group) => (
+                  <button
+                    key={group.key}
+                    type="button"
+                    onClick={() => onOpenBucket(group.key)}
+                    className="overflow-hidden rounded-lg border border-border bg-surface text-left transition hover:border-accent"
+                  >
+                    <div className="relative aspect-[16/9] max-h-28 bg-muted-bg sm:max-h-32">
+                      <AuthImage
+                        shotId={group.coverId}
+                        alt=""
+                        className="h-full w-full"
+                      />
+                      <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white">
+                        {group.shots.length}
+                      </span>
+                    </div>
+                    <div className="px-2.5 py-1.5">
+                      <div className="text-sm font-medium">
+                        {group.timeRange}
+                      </div>
+                      <div className="truncate text-xs text-muted">
+                        {group.deviceLabel ?? "Device"}
+                      </div>
+                    </div>
+                  </button>
+                ))}
               </div>
-            </button>
+            </section>
           ))}
         </div>
       </div>
@@ -731,6 +839,8 @@ function VideoMode({
     };
   }, [videoPath, activeSegment]);
 
+  const hourSections = useMemo(() => groupVideoCardsByHour(cards), [cards]);
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface text-sm text-muted">
@@ -782,49 +892,66 @@ function VideoMode({
 
       <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-surface">
         <div className="shrink-0 border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted">
-          Clips
+          Clips by hour
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
-          <div className="grid grid-cols-1 gap-2">
-            {cards.map((card) => {
-              const active = activeSegment?.id === card.id;
-              return (
-                <button
-                  key={card.id}
-                  type="button"
-                  onClick={() => onSelectSegment(card.id)}
-                  className={`overflow-hidden rounded-lg border text-left transition ${
-                    active
-                      ? "border-accent ring-1 ring-accent"
-                      : "border-border hover:border-accent"
-                  }`}
-                >
-                  <div className="relative aspect-[16/9] max-h-24 bg-muted-bg">
-                    {card.coverId ? (
-                      <AuthImage
-                        shotId={card.coverId}
-                        alt=""
-                        className="h-full w-full"
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-xs text-muted">
-                        No cover
-                      </div>
-                    )}
-                    <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white">
-                      {card.frameCount}
-                    </span>
-                  </div>
-                  <div className="px-2.5 py-1.5">
-                    <div className="text-sm font-medium">{card.timeRange}</div>
-                    <div className="truncate text-xs text-muted">
-                      {card.deviceLabel ?? "Device"} · ~
-                      {Math.max(1, Math.round(card.frameCount / fps))}s
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
+          <div className="flex flex-col gap-4">
+            {hourSections.map((section) => (
+              <section key={section.key}>
+                <div className="mb-1.5 flex items-baseline justify-between gap-2 px-0.5">
+                  <h3 className="text-xs font-semibold text-foreground">
+                    {section.label}
+                  </h3>
+                  <span className="text-[10px] text-muted">
+                    {section.cards.length} clip
+                    {section.cards.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-2">
+                  {section.cards.map((card) => {
+                    const active = activeSegment?.id === card.id;
+                    return (
+                      <button
+                        key={card.id}
+                        type="button"
+                        onClick={() => onSelectSegment(card.id)}
+                        className={`overflow-hidden rounded-lg border text-left transition ${
+                          active
+                            ? "border-accent ring-1 ring-accent"
+                            : "border-border hover:border-accent"
+                        }`}
+                      >
+                        <div className="relative aspect-[16/9] max-h-24 bg-muted-bg">
+                          {card.coverId ? (
+                            <AuthImage
+                              shotId={card.coverId}
+                              alt=""
+                              className="h-full w-full"
+                            />
+                          ) : (
+                            <div className="flex h-full items-center justify-center text-xs text-muted">
+                              No cover
+                            </div>
+                          )}
+                          <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white">
+                            {card.frameCount}
+                          </span>
+                        </div>
+                        <div className="px-2.5 py-1.5">
+                          <div className="text-sm font-medium">
+                            {card.timeRange}
+                          </div>
+                          <div className="truncate text-xs text-muted">
+                            {card.deviceLabel ?? "Device"} · ~
+                            {Math.max(1, Math.round(card.frameCount / fps))}s
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
           </div>
         </div>
       </aside>
@@ -909,7 +1036,7 @@ function AuthImage({
           observer.disconnect();
         }
       },
-      { rootMargin: "200px" },
+      { rootMargin: "800px" },
     );
     observer.observe(node);
     return () => observer.disconnect();
@@ -996,4 +1123,12 @@ function resolveDayKey(dayParam: string) {
   if (dayParam === "yesterday") return yesterdayKey();
   if (/^\d{4}-\d{2}-\d{2}$/.test(dayParam)) return dayParam;
   return todayKey();
+}
+
+/** Local calendar-day bounds as ISO strings for API from_ts / to_ts. */
+function localDayBounds(dayKey: string): { fromIso: string; toIso: string } {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const from = new Date(y, m - 1, d, 0, 0, 0, 0);
+  const to = new Date(y, m - 1, d, 23, 59, 59, 999);
+  return { fromIso: from.toISOString(), toIso: to.toISOString() };
 }
